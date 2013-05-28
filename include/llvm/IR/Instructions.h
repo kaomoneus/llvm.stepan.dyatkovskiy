@@ -22,16 +22,17 @@
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/InstrTypes.h"
+#include "llvm/Support/ConstantRange.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/IntegersSubset.h"
 #include "llvm/Support/IntegersSubsetMapping.h"
 #include <iterator>
+#include <utility>
 
 namespace llvm {
 
 class APInt;
 class ConstantInt;
-class ConstantRange;
 class DataLayout;
 class LLVMContext;
 
@@ -2843,6 +2844,368 @@ struct OperandTraits<SwitchInst> : public HungoffOperandTraits<2> {
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(SwitchInst, Value)
 
+//===----------------------------------------------------------------------===//
+//                               SwitchRInst Class
+//===----------------------------------------------------------------------===//
+
+//===---------------------------------------------------------------------------
+/// SwitchRInst - Multiway switch
+///
+template <class CaseItTy,
+          class SwitchRInstTy,
+          class BasicBlockTy>
+class SwitchRInstCaseItImplBase;
+
+class SwitchRInst : public TerminatorInst {
+
+  void *operator new(size_t, unsigned) LLVM_DELETED_FUNCTION;
+  unsigned ReservedSpace;
+
+  // Operands format:
+  // Operand[0]      = Value to switch on
+  // Operand[i+1]    = i-th Successor
+
+  /// Declare array of cases type for best readability
+public:
+  typedef ArrayRef<std::pair<ConstantRange, BasicBlock*> > CasesArrayRef;
+  typedef CasesArrayRef::iterator CasesArrayRefIt;
+private:
+
+  /// Format of case ranges storage
+  /// If we have flat and ordered collection of numbers, then range
+  /// [Low, High) may be represented as Low=collection[i], High=collection[i+1].
+  /// Thus all ranges are covered, also including the wrapped range:
+  /// Low=collection[collection.size()-1], High=collection[0].
+  /// For each collection item we also assign BasicBlock,
+  /// Let Range+BasicBlock will "Cluster".
+  /// For the "Ranges" defined below:
+  /// Range[i] is: Low=Ranges[i].second, High=Ranges[i+1].second;
+  /// BasicBlock[i] is: Ranges[i].first.
+  SmallVector<std::pair<unsigned, APInt>, 32> Ranges;
+
+  /// Resolves ranges count by successor index.
+  SmallVector<unsigned, 32> RangesCount;
+
+  /// Actually we did not remove ranges. We just redirect it from its successor
+  /// to the tombstone one. Number of removed ranges aids to calculate proper
+  /// amount of alive ranges.
+  unsigned RemovedRanges;
+  unsigned RemovedSuccessors;
+
+  // Successors are not removed as well. We just replace them with
+  // tombstone successor (contains the only "unreachable" instruction).
+  // This trick allows to keep all other successor indices without changing.
+  BasicBlock* TombstoneSuccessor;
+  static const unsigned TombstoneSuccessorIndex = static_cast<unsigned>(~0L-2);
+
+  SwitchRInst(const SwitchRInst &SI);
+  void init(Value *Value, CasesArrayRef Cases, bool SortCases);
+  void growOperands();
+  // allocate space for exactly zero operands
+  void *operator new(size_t s) {
+    return User::operator new(s, 0);
+  }
+
+  /// SwitchRInst ctor - Create a new switchr instruction, specifying a value to
+  /// switchr on.
+  /// "Cases" should contain
+  /// non-empty non-overlapped ascending ordered set of range+successor pairs.
+  /// This constructor can also autoinsert before another instruction.
+  SwitchRInst(Value *Value, CasesArrayRef Cases, Instruction *InsertBefore,
+              bool SortCases = false);
+
+  /// SwitchRInst ctor - Create a new switchr instruction, specifying a value to
+  /// switchr on.
+  /// "Cases" should contain
+  /// non-empty non-overlapped ascending ordered set of range+successor pairs.
+  /// This constructor also autoinserts at the end of the specified BasicBlock.
+  SwitchRInst(Value *Value, CasesArrayRef Cases, BasicBlock *InsertAtEnd,
+              bool SortCases = false);
+
+protected:
+  virtual SwitchRInst *clone_impl() const;
+public:
+
+  static SwitchRInst *Create(Value *Value,  CasesArrayRef Cases,
+                             Instruction *InsertBefore = 0,
+                             bool SortCases = false) {
+    return new SwitchRInst(Value, Cases, InsertBefore, SortCases);
+  }
+  static SwitchRInst *Create(Value *Value, CasesArrayRef Cases,
+                             BasicBlock *InsertAtEnd,
+                             bool SortCases = false) {
+    return new SwitchRInst(Value, Cases, InsertAtEnd, SortCases);
+  }
+
+  ~SwitchRInst();
+
+  /// Provide fast operand accessors
+  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+
+  class ConstCaseIt;
+  class CaseIt;
+
+  // Accessor Methods for SwitchR stmt
+  Value *getCondition() const { return getOperand(0); }
+  void setCondition(Value *V) { setOperand(0, V); }
+
+  /// getNumCases - return the number of 'cases' in this switchr instruction,
+  /// except tombstones.
+  unsigned getNumCases() const {
+    return getNumSuccessors() - RemovedSuccessors;
+  }
+
+  /// getNumRanges - returns number of case ranges except the ranges associated
+  /// with tombstone successor.
+  unsigned getNumRanges() const {
+    return Ranges.size() - RemovedRanges;
+  }
+
+  /// getNumRanges - returns number of case ranges associated with given
+  /// successor.
+  unsigned getNumRanges(unsigned SuccessorIndex) const {
+    assert(SuccessorIndex < getNumSuccessors() &&
+           "Successor index outs of bounds");
+    return RangesCount[SuccessorIndex];
+  }
+
+  /// Returns a read/write iterator that points to the first
+  /// case in SwitchRInst.
+  CaseIt case_begin() {
+    return CaseIt(this, true);
+  }
+  /// Returns a read-only iterator that points to the first
+  /// case in the SwitchRInst.
+  ConstCaseIt case_begin() const {
+    return ConstCaseIt(this, true);
+  }
+
+  /// Returns a read/write iterator that points one past the last
+  /// in the SwitchRInst.
+  CaseIt case_end() {
+    return CaseIt(this, Ranges.empty());
+  }
+  /// Returns a read-only iterator that points one past the last
+  /// in the SwitchRInst.
+  ConstCaseIt case_end() const {
+    return ConstCaseIt(this, Ranges.empty());
+  }
+
+  /// findCaseValue - Search all of the case values for the specified constant.
+  /// If it is explicitly handled, return the case iterator of it, otherwise
+  /// returns case_end iterator.
+  CaseIt findCaseValue(const APInt &C) {
+    for (CaseIt i = case_begin(), e = case_end(); i != e; ++i)
+      if (i.contains(C))
+        return i;
+    return case_end();
+  }
+
+  ConstCaseIt findCaseValue(const APInt &C) const {
+    for (ConstCaseIt i = case_begin(), e = case_end(); i != e; ++i)
+      if (i.contains(C))
+        return i;
+    return case_end();
+  }
+
+  /// findFirstDest - Finds the first case range for given successor.
+  /// If successor was not found returns case_end()
+  CaseIt findFirstDest(BasicBlock *BB) {
+    for (CaseIt i = case_begin(), e = case_end(); i != e; ++i)
+      if (i.getCaseSuccessor() == BB)
+        return i;
+    return case_end();
+  }
+  ConstCaseIt findFirstDest(BasicBlock *BB) const {
+    for (ConstCaseIt i = case_begin(), e = case_end(); i != e; ++i)
+      if (i.getCaseSuccessor() == BB)
+        return i;
+    return case_end();
+  }
+
+  /// offsetCases - Allows to offset all ranges collection
+  void offsetCases(const APInt &Offset);
+
+  /// addCase - Adds new case with initial CR range of possible values.
+  /// Note:
+  /// This action invalidates case_end(). Old case_end() iterator will
+  /// point to the added case.
+  /// Returns successor's index, that will usefull if you want to
+  /// add more ranges for this successor.
+  unsigned addCase(ConstantRange &CR, BasicBlock *Successor);
+
+  /// addCase - Adds range to case that is already exists.
+  void addCase(ConstantRange &CR, unsigned SuccessorIndex);
+
+  /// removeRange - This method removes the specified range. If
+  /// it was the last range for given successor, the successor will
+  /// also removed from 'switchr'. This operation doesn't reorder ranges, so
+  /// all case iterators stay valid.
+  /// Additional note:
+  /// Actually we did not remove ranges. We just redirect it from its successor
+  /// to the tombstone one.
+  void removeRange(CaseIt& i);
+
+  /// removeRangeForSuccessor - Removes all ranges associated with successor
+  /// given by its index. The successor will replaced with tombstone BB.
+  void removeWholeCase(unsigned SuccessorIndex);
+
+  unsigned getNumSuccessors() const { return getNumOperands()-1; }
+  BasicBlock *getSuccessor(unsigned idx) const {
+    assert(idx < getNumSuccessors() &&
+           "Successor idx out of range for switchr!");
+    return cast<BasicBlock>(getOperand(idx+1));
+  }
+  void setSuccessor(unsigned idx, BasicBlock *NewSucc) {
+    assert(idx < getNumSuccessors() && "Successor # out of range for switchr!");
+    setOperand(idx+1, (Value*)NewSucc);
+  }
+  void setSuccessor(CaseIt ci, BasicBlock *NewSucc) {
+    unsigned i = 0, e = getNumSuccessors();
+    for (;i != e && getSuccessor(i) != NewSucc; ++i)
+         ;
+    if (i == e)
+      i = addSuccessor(NewSucc, 1);
+    Ranges[ci.InternalIndex].first = i;
+  }
+
+  uint16_t hash() const {
+    // TODO: Need invent hash that would be equal for equal switchrs.
+    return 0x123;
+//    uint16_t Hash = 0;
+//    for (ConstCaseIt i = case_begin(), e = case_end(); i != e; ++i) {
+//      size_t LowHash = llvm::hash_value(i.getCaseRange().getLower());
+//      size_t HiHash = llvm::hash_value(i.getCaseRange().getUpper());
+//      Hash = (Hash << 1) ^ (0xFFFF & LowHash) ^ (HiHash >> 16);
+//    }
+//    return Hash;
+  }
+
+  // Case iterators definition.
+  template <class CaseItTy,
+            class SwitchRInstTy,
+            class BasicBlockTy>
+  friend class SwitchRInstCaseItImplBase;
+
+  class CaseIt {
+  protected:
+    template <class CaseItTy,
+              class SwitchRInstTy,
+              class BasicBlockTy>
+    friend class SwitchRInstCaseItImplBase;
+    friend class SwitchRInst;
+    SwitchRInst *SI;
+    unsigned long InternalIndex;
+    unsigned long ActualIndex;
+    CaseIt(SwitchRInst *SI, bool AtBegin);
+  public:
+    /// getCaseRange - Resolves case value for current case.
+    ConstantRange getCaseRange();
+
+    /// Returns true if range is single element. Does the same as
+    /// ConstantRange::isSingleElement
+    bool isSingleElement() const;
+
+    /// Returns integer value when range is single element,
+    /// throws assertion in another case.
+    const APInt &getSingleElement();
+
+    /// Returns true if range contains value V.
+    bool contains(const APInt &V) const;
+
+    /// Resolves successor for current case.
+    BasicBlock *getCaseSuccessor();
+
+    /// Returns TerminatorInst's successor index for current case successor.
+    unsigned getSuccessorIndex() const;
+
+    // Note increment skips tombstones.
+    CaseIt operator++();
+    CaseIt operator++(int);
+    CaseIt operator--();
+    CaseIt operator--(int);
+    bool operator==(const CaseIt& RHS) const;
+    bool operator!=(const CaseIt& RHS) const;
+  };
+
+  class ConstCaseIt {
+  protected:
+    template <class CaseItTy,
+              class SwitchRInstTy,
+              class BasicBlockTy>
+    friend class SwitchRInstCaseItImplBase;
+    friend class SwitchRInst;
+    const SwitchRInst *SI;
+    unsigned long InternalIndex;
+    unsigned long ActualIndex;
+    ConstCaseIt(const SwitchRInst *SI, bool AtBegin);
+  public:
+    /// getCaseRange - Resolves case value for current case.
+    ConstantRange getCaseRange();
+
+    /// Returns true if range is single element. Does the same as
+    /// ConstantRange::isSingleElement
+    bool isSingleElement() const;
+
+    /// Returns integer value when range is single element,
+    /// throws assertion in another case.
+    const APInt &getSingleElement();
+
+    /// Returns true if range contains value V.
+    bool contains(const APInt &V) const;
+
+    /// Resolves successor for current case.
+    const BasicBlock *getCaseSuccessor();
+
+    /// Returns TerminatorInst's successor index for current case successor.
+    unsigned getSuccessorIndex() const;
+
+    // Note increment skips tombstones.
+    ConstCaseIt operator++();
+    ConstCaseIt operator++(int);
+    ConstCaseIt operator--();
+    ConstCaseIt operator--(int);
+    bool operator==(const ConstCaseIt& RHS) const;
+    bool operator!=(const ConstCaseIt& RHS) const;
+  };
+
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+
+  static inline bool classof(const Instruction *I) {
+    return I->getOpcode() == Instruction::SwitchR;
+  }
+  static inline bool classof(const Value *V) {
+    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+  }
+private:
+  virtual BasicBlock *getSuccessorV(unsigned idx) const;
+  virtual unsigned getNumSuccessorsV() const;
+  virtual void setSuccessorV(unsigned idx, BasicBlock *B);
+
+  /// addRange - Adds new range to Ranges collection.
+  /// Take into account wrapped ranges
+  /// Note: Adding non-wrapped range you just split wrapped case
+  /// coverage area.
+  void addRange(ConstantRange &CR, unsigned SuccessorIndex);
+
+  /// addConsecutiveRange - Adds range if it is consecutive relative to
+  /// Ranges collection, in another words if its Lower bound greater
+  /// or equal to the Upper bound of last value in Ranges.
+  bool addConsecutiveRange(ConstantRange &CR, unsigned SuccessorIndex);
+
+  /// addSuccessor - Adds new successor. Returns its TerminatorInst's index.
+  unsigned addSuccessor(BasicBlock *S, unsigned InitialRangesCount);
+
+  /// removeSuccessor - Removes successor from operands collection.
+  void removeSuccessor(unsigned SuccessorIndex);
+};
+
+
+template <>
+struct OperandTraits<SwitchRInst> : public HungoffOperandTraits<2> {
+};
+
+DEFINE_TRANSPARENT_OPERAND_ACCESSORS(SwitchRInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                             IndirectBrInst Class

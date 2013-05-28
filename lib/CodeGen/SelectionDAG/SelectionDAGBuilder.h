@@ -423,6 +423,7 @@ private:
   void visitRet(const ReturnInst &I);
   void visitBr(const BranchInst &I);
   void visitSwitch(const SwitchInst &I);
+  void visitSwitchR(const SwitchRInst &I) {/*stub*/}
   void visitIndirectBr(const IndirectBrInst &I);
   void visitUnreachable(const UnreachableInst &I) { /* noop */ }
 

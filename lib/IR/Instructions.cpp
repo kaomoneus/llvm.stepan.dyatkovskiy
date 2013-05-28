@@ -24,6 +24,7 @@
 #include "llvm/Support/ConstantRange.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
+#include <algorithm>
 using namespace llvm;
 
 //===----------------------------------------------------------------------===//
@@ -3278,6 +3279,665 @@ void SwitchInst::setSuccessorV(unsigned idx, BasicBlock *B) {
 }
 
 //===----------------------------------------------------------------------===//
+//                        SwitchRInst Implementation
+//===----------------------------------------------------------------------===//
+
+struct RangesLessCmp {
+  bool operator()(const std::pair<ConstantRange, BasicBlock*> &LHS,
+                  const std::pair<ConstantRange, BasicBlock*> &RHS) {
+    if (LHS.first.getLower().ult(RHS.first.getLower()))
+      return true;
+    if (RHS.first.getLower().ult(LHS.first.getLower()))
+      return false;
+    return (LHS.first.getSetSize().ult(RHS.first.getSetSize()));
+  }
+};
+
+struct SwitchRCaseCmp {
+  bool operator()(const std::pair<ConstantRange, BasicBlock*> &LHS,
+                  const std::pair<ConstantRange, BasicBlock*> &RHS) {
+    if (LHS.first.getLower().ult(RHS.first.getLower()))
+      return true;
+    if (RHS.first.getLower().ult(LHS.first.getLower()))
+      return false;
+    return (LHS.first.getSetSize().ult(RHS.first.getSetSize()));
+  }
+};
+
+void SwitchRInst::init(Value *Value, CasesArrayRef Cases, bool SortCases) {
+  assert(Value && Cases.size());
+
+  const unsigned BadIndex = -1U;
+
+  DenseMap<BasicBlock*, unsigned> SuccessorIndices;
+  SmallVector<std::pair<ConstantRange, BasicBlock*>, 32 > CasesVector;
+  for (CasesArrayRefIt i = Cases.begin(), e = Cases.end(); i != e; ++i) {
+    SuccessorIndices.insert(std::make_pair(i->second, BadIndex));
+    CasesVector.push_back(*i);
+  }
+
+  if (SortCases)
+    std::sort(CasesVector.begin(), CasesVector.end(), SwitchRCaseCmp());
+
+  ReservedSpace = 1 + SuccessorIndices.size();
+  NumOperands = 1;
+  OperandList = allocHungoffUses(ReservedSpace);
+
+  OperandList[0] = Value;
+
+  RemovedRanges = 0;
+  RemovedSuccessors = 0;
+  TombstoneSuccessor = 0;
+
+  // TODO: Solve issue with PHI nodes:
+  // Assertion:
+  // PHINode should have one entry for each predecessor of its parent
+  // basic block!
+//  for (SmallVectorImpl<std::pair<ConstantRange, BasicBlock*> >::iterator
+//       i = CasesVector.begin(), e = CasesVector.end(); i != e; ++i) {
+//    if (SuccessorIndices[i->second] == BadIndex)
+//      SuccessorIndices[i->second] = addCase(i->first, i->second);
+//    else
+//      addCase(i->first, SuccessorIndices[i->second]);
+//  }
+  for (SmallVectorImpl<std::pair<ConstantRange, BasicBlock*> >::iterator
+       i = CasesVector.begin(), e = CasesVector.end(); i != e; ++i)
+    addCase(i->first, i->second);
+}
+
+/// SwitchRInst ctor - Create a new switchr instruction, specifying a value to
+/// switchr on.
+/// "Cases" should contain
+/// non-empty non-overlapped ascending ordered set of range+successor pairs.
+/// This constructor can also autoinsert before another instruction.
+SwitchRInst::SwitchRInst(Value *Value, CasesArrayRef Cases,
+                         Instruction *InsertBefore,
+                         bool SortCases)
+  : TerminatorInst(Type::getVoidTy(Value->getContext()), Instruction::SwitchR,
+                   0, 0, InsertBefore) {
+  init(Value, Cases, SortCases);
+}
+
+/// SwitchRInst ctor - Create a new switchr instruction, specifying a value to
+/// switchr on.
+/// "Cases" should contain
+/// non-empty non-overlapped ascending ordered set of range+successor pairs.
+/// This constructor also autoinserts at the end of the specified BasicBlock.
+SwitchRInst::SwitchRInst(Value *Value, CasesArrayRef Cases,
+                         BasicBlock *InsertAtEnd, bool SortCases)
+  : TerminatorInst(Type::getVoidTy(Value->getContext()), Instruction::SwitchR,
+                   0, 0, InsertAtEnd) {
+  init(Value, Cases, SortCases);
+}
+
+SwitchRInst::SwitchRInst(const SwitchRInst &SI)
+  : TerminatorInst(SI.getType(), Instruction::SwitchR, 0, 0) {
+
+  ReservedSpace = SI.getNumOperands();
+  NumOperands = SI.getNumOperands();
+  OperandList = allocHungoffUses(ReservedSpace);
+
+  Use *OL = OperandList, *InOL = SI.OperandList;
+
+  for (unsigned i = 0, E = SI.getNumOperands(); i != E; ++i)
+    OL[i] = InOL[i];
+
+  Ranges = SI.Ranges;
+  RangesCount = SI.RangesCount;
+  RemovedRanges = SI.RemovedRanges;
+  RemovedSuccessors = SI.RemovedSuccessors;
+  SubclassOptionalData = SI.SubclassOptionalData;
+  TombstoneSuccessor = SI.TombstoneSuccessor;
+}
+
+SwitchRInst::~SwitchRInst() {
+  dropHungoffUses();
+}
+
+void SwitchRInst::offsetCases(const APInt &Offset) {
+  for (unsigned i = 0, e = Ranges.size(); i != e; ++i) {
+    Ranges[i].second += Offset;
+  }
+}
+
+/// addCase - Adds new case with initial CR range of possible values.
+/// The case should be consequtive relative to the cases already added.
+/// If Lower bound of case to be added equal to the Upper bound of
+/// last added case, and if these cases has the same successor,
+/// they will merged then.
+/// Note:
+/// This action invalidates case_end(). Old case_end() iterator will
+/// point to the added case.
+/// Returns successor's index, that will usefull if you want to
+/// add more ranges for this successor.
+unsigned SwitchRInst::addCase(ConstantRange &CR,
+                             BasicBlock *Successor) {
+  unsigned SuccessorIndex = addSuccessor(Successor, 1);
+  addRange(CR, SuccessorIndex);
+  return SuccessorIndex;
+}
+
+/// addCase - Adds range to case that is already exists.
+void SwitchRInst::addCase(ConstantRange &CR, unsigned SuccessorIndex) {
+  addRange(CR, SuccessorIndex);
+  ++RangesCount[SuccessorIndex];
+}
+
+/// removeRange - This method removes the specified range. If
+/// it was the last range for given successor, the successor will
+/// also removed from 'switchr'. This operation doesn't reorder ranges, so
+/// all case iterators stay valid.
+/// Additional note:
+/// Actually we did not remove ranges. We just redirect it from its successor
+/// to the tombstone one.
+void SwitchRInst::removeRange(CaseIt& i) {
+  unsigned idx = i.InternalIndex;
+  assert(idx < Ranges.size() && "Operator index out of bounds");
+  unsigned SuccessorIndex = Ranges[idx].first;
+
+  // Just set successor of removed range to default. That's all.
+  Ranges[idx].first = TombstoneSuccessorIndex;
+  ++RemovedRanges;
+
+  assert(RangesCount[SuccessorIndex] &&
+         "Invalid RangesCount information for successor to be removed.");
+
+  if (--RangesCount[SuccessorIndex] == 0)
+    removeSuccessor(SuccessorIndex);
+}
+
+/// removeRangeForSuccessor - Removes all ranges associated with successor
+/// given by its index. The successor will also removed.
+void SwitchRInst::removeWholeCase(unsigned SuccessorIndex) {
+  for (unsigned i = Ranges.size(); i != 0;) {
+    --i;
+    if (Ranges[i].first == SuccessorIndex) {
+      Ranges[i].first = TombstoneSuccessorIndex;
+      ++RemovedRanges;
+    }
+  }
+  removeSuccessor(SuccessorIndex);
+}
+
+/// growOperands - grow operands - This grows the operand list in response
+/// to a push_back style of operation.  This grows the number of ops by 3 times.
+///
+void SwitchRInst::growOperands() {
+  unsigned e = getNumOperands();
+  unsigned NumOps = e*3;
+
+  ReservedSpace = NumOps;
+  Use *NewOps = allocHungoffUses(NumOps);
+  Use *OldOps = OperandList;
+  for (unsigned i = 0; i != e; ++i) {
+      NewOps[i] = OldOps[i];
+  }
+  OperandList = NewOps;
+  Use::zap(OldOps, OldOps + e, true);
+}
+
+
+BasicBlock *SwitchRInst::getSuccessorV(unsigned idx) const {
+  return getSuccessor(idx);
+}
+unsigned SwitchRInst::getNumSuccessorsV() const {
+  return getNumSuccessors();
+}
+void SwitchRInst::setSuccessorV(unsigned idx, BasicBlock *B) {
+  setSuccessor(idx, B);
+}
+
+/// addRange - Adds new range to Ranges collection.
+/// Take into account wrapped ranges
+/// Note: Adding non-wrapped range you just split wrapped case
+/// coverage area.
+void SwitchRInst::addRange(ConstantRange &CR, unsigned SuccessorIndex) {
+
+  // Treat empty set as full set.
+  if (CR.isWrappedSet() || CR.isEmptySet()) {
+    assert((Ranges.empty() ||
+            (Ranges.front().second.uge(CR.getUpper()) &&
+             Ranges.back().second.ule(CR.getLower()))) &&
+           "Ranges are overlapped.");
+
+    if (Ranges.empty()) {
+      Ranges.push_back(std::make_pair(TombstoneSuccessorIndex, CR.getUpper()));
+      ++RemovedRanges;
+      Ranges.push_back(std::make_pair(SuccessorIndex, CR.getLower()));
+      return;
+    }
+
+    unsigned OldWrappedSuccessorIndex = Ranges.back().first;
+    if (OldWrappedSuccessorIndex == SuccessorIndex)
+      return;
+
+    // When some hole with Tombstone disappears - we
+    // decrement the number of holes.
+    if (OldWrappedSuccessorIndex == TombstoneSuccessorIndex &&
+        Ranges.front().second == CR.getUpper() &&
+        Ranges.back().second == CR.getLower()) {
+      --RemovedRanges;
+    }
+
+    if (Ranges.front().second != CR.getUpper()) {
+      Ranges.insert(Ranges.begin(),
+                    std::make_pair(OldWrappedSuccessorIndex,
+                                   CR.getUpper()));
+    }
+
+    if (Ranges.back().second == CR.getLower()) {
+      // Do merge if possible:
+      // If we have:
+      //             [V0, V1) --> S0
+      //             [V1, V2) --> S1
+      //             [V2, V0) --> S_Old_Wrapped
+      //
+      // That equal to Ranges contents:
+      // (V0, S0), (V1, S1), (V2, S_Old_Wrapped)
+      //
+      // Let, we add [V2, V0-R) --> S1, note it is wrapped too,
+      // then we can merge [V1, V2) and [V2, V0-R), into [V1, V0-R)
+      // so we should got:
+      //             [V0-R, V0) --> S_Old_Wrapped
+      //             [V0, V1)   --> S0
+      //             [V1, V0-R) --> S1 ; Now is wrapped
+      // That equal to Ranges contents:
+      // (V0-R, S_Old_Wrapped) (V0, S0), (V1, S1 /*New wrapped*/)
+      //
+      // V2 is removed from Ranges in this case.
+
+      if (Ranges.size() > 1 &&
+          Ranges[Ranges.size()-2].first == SuccessorIndex) {
+        Ranges.pop_back();
+      } else
+        Ranges.back().first = SuccessorIndex;
+    }
+    else
+      Ranges.push_back(std::make_pair(SuccessorIndex, CR.getLower()));
+
+    return;
+  }
+
+  if (!addConsecutiveRange(CR, SuccessorIndex))
+    llvm_unreachable(
+        "You tried to add non-consequtive range. "
+        "Perhaps, you forgot set SortCases = true in SwitchRInst constructor.");
+}
+
+/// addConsecutiveRange - Adds range if it is consecutive relative to
+/// Ranges collection, in another words if its Lower bound greater
+/// or equal to the Upper bound of last value in Ranges.
+bool SwitchRInst::addConsecutiveRange(ConstantRange &CR,
+                                     unsigned SuccessorIndex) {
+
+  // before: ... [Last.Low, Last.High)------------> SuccessorForLast;
+  //             [Last.High, +INF) (-INF, Start)--> WrappedSuccessor
+  //
+  // after:  ... [Last.Low, Last.High)------------> SuccessorForLast;
+  //             [Last.High, CR.Low)--------------> WrappedSuccessor
+  //             [CR.Low, CR.High)----------------> SuccessorIndex
+  //             [CR.High, +INF) (-INF, Start)----> WrappedSuccessor
+
+  if (Ranges.empty()) {
+    Ranges.push_back(std::make_pair(SuccessorIndex, CR.getLower()));
+    // Consinder wrapping range as removed.
+    Ranges.push_back(std::make_pair(TombstoneSuccessorIndex, CR.getUpper()));
+    ++RemovedRanges;
+    return true;
+  }
+
+  unsigned WrappedSuccessorIndex = Ranges.back().first;
+
+  // Don't add range into wrapped successor coverage area
+  // if this range has also the same (wrapped) successor.
+  if (SuccessorIndex == WrappedSuccessorIndex)
+    return true;
+
+  if (CR.getLower().ugt(Ranges.back().second)) {
+    Ranges.push_back(std::make_pair(SuccessorIndex, CR.getLower()));
+    Ranges.push_back(std::make_pair(WrappedSuccessorIndex, CR.getUpper()));
+
+    // If wrapped successor is tombstone, we create new black hole then.
+    // Count it.
+    if (WrappedSuccessorIndex == TombstoneSuccessorIndex)
+      ++RemovedRanges;
+
+    return true;
+  }
+
+  if (CR.getLower() == Ranges.back().second) {
+
+    // Try do the merging.
+    if (Ranges.size() > 1 &&
+        Ranges[Ranges.size()-2].first == SuccessorIndex) {
+      Ranges.back().second = CR.getUpper();
+      return true;
+    }
+
+    Ranges.back().first = SuccessorIndex;
+    Ranges.push_back(std::make_pair(WrappedSuccessorIndex, CR.getUpper()));
+    return true;
+  }
+
+  return false;
+}
+
+/// addSuccessor - Adds new successor. Returns its TerminatorInst's index.
+unsigned SwitchRInst::addSuccessor(
+    BasicBlock *S, unsigned InitialRangesCount) {
+
+  unsigned NewSuccessorIdx = getNumSuccessors();
+
+  assert(RangesCount.size() == getNumSuccessors() &&
+         "RangesCount collection should be synchronized with successors one.");
+
+  unsigned OpNo = NumOperands;
+  if (OpNo+1 > ReservedSpace)
+    growOperands();  // Get more space!
+  // Initialize some new operands.
+  assert(OpNo < ReservedSpace && "Growing didn't work!");
+  ++NumOperands;
+
+  setSuccessor(NewSuccessorIdx, S);
+
+  RangesCount.push_back(InitialRangesCount);
+
+  return NewSuccessorIdx;
+}
+
+/// removeSuccessor - Removes successor from operands collection.
+void SwitchRInst::removeSuccessor(unsigned SuccessorIndex) {
+
+  assert(SuccessorIndex+1 < getNumOperands() &&
+         "Index out of range. Wrong data in successors info?");
+
+  BasicBlock *ToBeRemovedBB = getSuccessor(SuccessorIndex);
+
+  if (!TombstoneSuccessor) {
+    TombstoneSuccessor = BasicBlock::Create(getContext(), "tombstone-succ",
+                                            getParent()->getParent(),
+                                            ToBeRemovedBB);
+    new UnreachableInst(getContext(), TombstoneSuccessor);
+  }
+  setSuccessor(SuccessorIndex, TombstoneSuccessor);
+  ++RemovedSuccessors;
+}
+
+//===----------------------------------------------------------------------===//
+//                    SwitchR case iterators Implementation
+//===----------------------------------------------------------------------===//
+
+namespace llvm {
+template<class CaseItTy, class SwitchRInstTy, class BasicBlockTy>
+class SwitchRInstCaseItImplBase {
+protected:
+  CaseItTy* It;
+
+  BasicBlockTy *getCaseSuccessor(unsigned RangeIdx) {
+    return It->SI->getSuccessor(It->SI->Ranges[RangeIdx].first);
+  }
+
+public:
+  typedef SwitchRInstCaseItImplBase<CaseItTy, SwitchRInstTy, BasicBlockTy> Self;
+
+  SwitchRInstCaseItImplBase(CaseItTy* ItPtr) : It(ItPtr) {}
+
+  void initAtBegin(SwitchRInstTy *SI) {
+    It->SI = SI;
+    unsigned e = It->SI->Ranges.size();
+
+    for (It->InternalIndex = 0;
+        It->InternalIndex < e
+            && It->SI->Ranges[It->InternalIndex].first
+                == SwitchRInst::TombstoneSuccessorIndex; ++(It->InternalIndex))
+      ;
+  }
+  void initAtEnd(SwitchRInstTy *SI) {
+    It->SI = SI;
+    It->InternalIndex = It->SI->Ranges.size();
+  }
+
+  /// getCaseRange - Resolves case value for current case.
+  ConstantRange getCaseRange() {
+    assert(It->InternalIndex < It->SI->Ranges.size()
+           && "Index out the number of cases.");
+
+    if (It->InternalIndex != It->SI->Ranges.size() - 1)
+      return ConstantRange(It->SI->Ranges[It->InternalIndex].second,
+                           It->SI->Ranges[It->InternalIndex + 1].second);
+
+    if (It->SI->Ranges.size() == 1) {
+      return ConstantRange(
+          APInt::getMinValue(It->SI->Ranges[0].second.getBitWidth()),
+          APInt::getMinValue(It->SI->Ranges[0].second.getBitWidth()));
+    }
+
+    return ConstantRange(It->SI->Ranges[It->InternalIndex].second,
+                         It->SI->Ranges[0].second);
+  }
+
+  /// Returns true if range is single element. Does the same as
+  /// ConstantRange::isSingleElement
+  bool isSingleElement() const {
+    assert(It->InternalIndex < It->SI->Ranges.size()
+           && "Index out the number of cases.");
+    return (It->InternalIndex != It->SI->Ranges.size() - 1
+            && It->SI->Ranges[It->InternalIndex + 1].second
+               == It->SI->Ranges[It->InternalIndex].second + 1);
+  }
+
+  /// Returns integer value when range is single element,
+  /// throws assertion in another case.
+  const APInt &getSingleElement() {
+    assert(
+        It->InternalIndex < It->SI->Ranges.size()
+            && "Index out the number of cases.");
+    assert(isSingleElement() && "Case should be single element (L+1 == H)");
+    return It->SI->Ranges[It->InternalIndex].second;
+  }
+
+  /// Returns true if range contains value V.
+  bool contains(const APInt &V) const {
+    assert(
+        It->InternalIndex < It->SI->Ranges.size()
+            && "Index out the number of cases.");
+    if (It->InternalIndex == It->SI->Ranges.size() - 1) {
+      return It->SI->Ranges[It->InternalIndex].second.ule(V)
+          || V.ult(It->SI->Ranges[0].second);
+    }
+    return It->SI->Ranges[It->InternalIndex].second.ule(V)
+        && V.ult(It->SI->Ranges[It->InternalIndex + 1].second);
+  }
+
+  /// Resolves successor for current case.
+  BasicBlockTy *getCaseSuccessor() {
+    return getCaseSuccessor(It->InternalIndex);
+  }
+
+  /// Returns TerminatorInst's successor index for current case successor.
+  unsigned getSuccessorIndex() const {
+    assert((It->InternalIndex < It->SI->Ranges.size()) &&
+           "Index out the number of cases.");
+    return It->SI->Ranges[It->InternalIndex].first;
+  }
+
+  unsigned getCaseIndex() const {
+    return It->ActualIndex;
+  }
+
+  // Note increment skips tombstones.
+  CaseItTy operator++() {
+    // Check index correctness after increment.
+    // Note: Index == Ranges.size() means end().
+    unsigned e = It->SI->Ranges.size();
+    assert(It->InternalIndex + 1 <= e && "Index out the number of cases.");
+    do
+      // Skip tombstones.
+      ++(It->InternalIndex);
+    while (It->InternalIndex < e && It->SI->Ranges[It->InternalIndex].first ==
+                                    SwitchRInst::TombstoneSuccessorIndex);
+    return *It;
+  }
+
+  CaseItTy operator--() {
+    // Check index correctness after decrement.
+    // Note: Index == getNumCases() means end().
+    // Also allow "-1" iterator here. That will became valid after ++.
+    unsigned e = It->SI->Ranges.size();
+    assert(
+        (It->InternalIndex == 0 || It->InternalIndex - 1 <= e)
+            && "Index out the number of cases.");
+    do
+      // Skip tombstones.
+      // If Index is already 0, it will wrapped and
+      // became > It->SI->getNumCases()
+      --It->InternalIndex;
+    while (It->InternalIndex < e && It->SI->Ranges[It->InternalIndex].first ==
+                                    SwitchRInst::TombstoneSuccessorIndex);
+    return *It;
+  }
+
+  bool operator==(const CaseItTy& RHS) const {
+    assert(RHS.SI == It->SI && "Incompatible operators.");
+    return RHS.InternalIndex == It->InternalIndex;
+  }
+  bool operator!=(const CaseItTy& RHS) const {
+    assert(RHS.SI == It->SI && "Incompatible operators.");
+    return !operator ==(RHS);
+  }
+};
+} // namespace llvm
+
+typedef SwitchRInstCaseItImplBase<SwitchRInst::CaseIt,
+                                 SwitchRInst,
+                                 BasicBlock>
+        SwitchRInstCaseItImpl;
+
+typedef SwitchRInstCaseItImplBase<SwitchRInst::ConstCaseIt,
+                                 const SwitchRInst,
+                                 const BasicBlock>
+        SwitchRInstConstCaseItImpl;
+
+SwitchRInst::CaseIt::CaseIt(SwitchRInst *SI, bool AtBegin) {
+  AtBegin ?
+  SwitchRInstCaseItImpl(this).initAtBegin(SI) :
+  SwitchRInstCaseItImpl(this).initAtEnd(SI);
+}
+SwitchRInst::ConstCaseIt::ConstCaseIt(const SwitchRInst *SI, bool AtBegin) {
+  AtBegin ?
+  SwitchRInstConstCaseItImpl(this).initAtBegin(SI) :
+  SwitchRInstConstCaseItImpl(this).initAtEnd(SI);
+}
+
+/// getCaseRange - Resolves case value for current case.
+ConstantRange SwitchRInst::CaseIt::getCaseRange(){
+  return SwitchRInstCaseItImpl(this).getCaseRange();
+}
+ConstantRange SwitchRInst::ConstCaseIt::getCaseRange(){
+  return SwitchRInstConstCaseItImpl(this).getCaseRange();
+}
+
+/// Returns true if range is single element. Does the same as
+/// ConstantRange::isSingleElement
+bool SwitchRInst::CaseIt::isSingleElement() const{
+  return SwitchRInstCaseItImpl(const_cast<CaseIt*>(this)).isSingleElement();
+}
+bool SwitchRInst::ConstCaseIt::isSingleElement() const {
+  return SwitchRInstConstCaseItImpl(const_cast<ConstCaseIt*>(this)).
+      isSingleElement();
+}
+
+/// Returns integer value when range is single element,
+/// throws assertion in another case.
+const APInt &SwitchRInst::CaseIt::getSingleElement(){
+  return SwitchRInstCaseItImpl(this).getSingleElement();
+}
+const APInt &SwitchRInst::ConstCaseIt::getSingleElement(){
+  return SwitchRInstConstCaseItImpl(this).getSingleElement();
+}
+
+/// Returns true if range contains value V.
+bool SwitchRInst::CaseIt::contains(const APInt &V) const {
+  return SwitchRInstCaseItImpl(const_cast<CaseIt*>(this)).contains(V);
+}
+bool SwitchRInst::ConstCaseIt::contains(const APInt &V) const {
+  return SwitchRInstConstCaseItImpl(const_cast<ConstCaseIt*>(this)).contains(V);
+}
+
+/// Resolves successor for current case.
+BasicBlock *SwitchRInst::CaseIt::getCaseSuccessor(){
+  return SwitchRInstCaseItImpl(this).getCaseSuccessor();
+}
+const BasicBlock *SwitchRInst::ConstCaseIt::getCaseSuccessor(){
+  return SwitchRInstConstCaseItImpl(this).getCaseSuccessor();
+}
+
+
+/// Returns TerminatorInst's successor index for current case successor.
+unsigned SwitchRInst::CaseIt::getSuccessorIndex() const {
+  return SwitchRInstCaseItImpl(const_cast<CaseIt*>(this)).getSuccessorIndex();
+}
+unsigned SwitchRInst::ConstCaseIt::getSuccessorIndex() const {
+  return SwitchRInstConstCaseItImpl(const_cast<ConstCaseIt*>(this)).
+      getSuccessorIndex();
+}
+
+// Note increment skips tombstones.
+SwitchRInst::CaseIt SwitchRInst::CaseIt::operator++() {
+  return ++SwitchRInstCaseItImpl(this);
+}
+SwitchRInst::ConstCaseIt SwitchRInst::ConstCaseIt::operator++() {
+  return ++SwitchRInstConstCaseItImpl(this);
+}
+
+SwitchRInst::CaseIt SwitchRInst::CaseIt::operator--() {
+  return --SwitchRInstCaseItImpl(this);
+}
+SwitchRInst::ConstCaseIt SwitchRInst::ConstCaseIt::operator--() {
+  return --SwitchRInstConstCaseItImpl(this);
+}
+
+SwitchRInst::CaseIt SwitchRInst::CaseIt::operator++(int) {
+  SwitchRInst::CaseIt tmp = *this;
+  ++(*this);
+  return tmp;
+}
+SwitchRInst::ConstCaseIt SwitchRInst::ConstCaseIt::operator++(int) {
+  SwitchRInst::ConstCaseIt tmp = *this;
+  ++(*this);
+  return tmp;
+}
+
+SwitchRInst::CaseIt SwitchRInst::CaseIt::operator--(int) {
+  SwitchRInst::CaseIt tmp = *this;
+  --(*this);
+  return tmp;
+}
+SwitchRInst::ConstCaseIt SwitchRInst::ConstCaseIt::operator--(int) {
+  SwitchRInst::ConstCaseIt tmp = *this;
+  --(*this);
+  return tmp;
+}
+
+bool SwitchRInst::CaseIt::
+operator==(const SwitchRInst::CaseIt& RHS) const {
+  return SwitchRInstCaseItImpl(const_cast<CaseIt*>(this)) == RHS;
+}
+bool SwitchRInst::ConstCaseIt::
+operator==(const SwitchRInst::ConstCaseIt& RHS) const {
+  return SwitchRInstConstCaseItImpl(const_cast<ConstCaseIt*>(this)) == RHS;
+}
+
+bool SwitchRInst::CaseIt::
+operator!=(const SwitchRInst::CaseIt& RHS) const {
+  return SwitchRInstCaseItImpl(const_cast<CaseIt*>(this)) != RHS;
+}
+bool SwitchRInst::ConstCaseIt::
+operator!=(const SwitchRInst::ConstCaseIt& RHS) const {
+  return SwitchRInstConstCaseItImpl(const_cast<ConstCaseIt*>(this)) != RHS;
+}
+
+//===----------------------------------------------------------------------===//
 //                        IndirectBrInst Implementation
 //===----------------------------------------------------------------------===//
 
@@ -3532,6 +4192,10 @@ BranchInst *BranchInst::clone_impl() const {
 
 SwitchInst *SwitchInst::clone_impl() const {
   return new SwitchInst(*this);
+}
+
+SwitchRInst *SwitchRInst::clone_impl() const {
+  return new SwitchRInst(*this);
 }
 
 IndirectBrInst *IndirectBrInst::clone_impl() const {
