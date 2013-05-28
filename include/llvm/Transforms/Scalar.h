@@ -334,6 +334,14 @@ Pass *createCorrelatedValuePropagationPass();
 
 //===----------------------------------------------------------------------===//
 //
+// SwitchToSwitchR - The SwitchToSwitchR pass rewrites 'switch' instructions 
+// with 'switchr' ones.
+//
+FunctionPass *createSwitchToSwitchRPass();
+extern char &SwitchToSwitchRID;
+
+//===----------------------------------------------------------------------===//
+//
 // InstructionSimplifier - Remove redundant instructions.
 //
 FunctionPass *createInstructionSimplifierPass();
