@@ -189,6 +189,9 @@ private:
   };
 
   size_t Clusterify(CaseVector &Cases, const SwitchInst &SI);
+  size_t Clusterify(CaseVector &Cases,
+                    const BasicBlock* TreatAsDefault,
+                    const SwitchRInst &SI);
 
   /// CaseBlock - This structure is used to communicate between
   /// SelectionDAGBuilder and SDISel for the code generation of additional basic
@@ -423,7 +426,7 @@ private:
   void visitRet(const ReturnInst &I);
   void visitBr(const BranchInst &I);
   void visitSwitch(const SwitchInst &I);
-  void visitSwitchR(const SwitchRInst &I) {/*stub*/}
+  void visitSwitchR(const SwitchRInst &I);
   void visitIndirectBr(const IndirectBrInst &I);
   void visitUnreachable(const UnreachableInst &I) { /* noop */ }
 

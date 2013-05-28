@@ -1187,6 +1187,7 @@ int TargetLoweringBase::InstructionOpcodeToISD(unsigned Opcode) const {
   case Ret:            return 0;
   case Br:             return 0;
   case Switch:         return 0;
+  case SwitchR:        return 0;
   case IndirectBr:     return 0;
   case Invoke:         return 0;
   case Resume:         return 0;

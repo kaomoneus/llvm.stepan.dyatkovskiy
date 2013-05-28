@@ -561,6 +561,12 @@ void SCCPSolver::getFeasibleSuccessors(TerminatorInst &TI,
     return;
   }
 
+  // TODO:
+  if (SwitchRInst *SI = dyn_cast<SwitchRInst>(&TI)) {
+    Succs.assign(TI.getNumSuccessors(), true);
+    return;
+  }
+
   // TODO: This could be improved if the operand is a [cast of a] BlockAddress.
   if (isa<IndirectBrInst>(&TI)) {
     // Just mark all destinations executable!
@@ -617,6 +623,11 @@ bool SCCPSolver::isEdgeFeasible(BasicBlock *From, BasicBlock *To) {
       return !SCValue.isUndefined();
 
     return SI->findCaseValue(CI).getCaseSuccessor() == To;
+  }
+
+  // TODO:
+  if (SwitchRInst *SI = dyn_cast<SwitchRInst>(TI)) {
+    return true;
   }
 
   // Just mark all destinations executable!
@@ -1486,6 +1497,27 @@ bool SCCPSolver::ResolvedUndefsIn(Function &F) {
       markForcedConstant(SI->getCondition(), SI->case_begin().getCaseValue());
       return true;
     }
+
+    // TODO:
+    if (SwitchRInst *SI = dyn_cast<SwitchRInst>(TI)) {
+      if (!SI->getNumCases())
+        continue;
+      if (!getValueState(SI->getCondition()).isUndefined())
+        continue;
+
+      // If the input to SCCP is actually switch on undef, fix the undef to
+      // the first constant
+      APInt FirstLow = SI->case_begin().getCaseRange().getLower();
+      ConstantInt* FirstVal = ConstantInt::get(TI->getContext(), FirstLow);
+      if (isa<UndefValue>(SI->getCondition())) {
+        SI->setCondition(FirstVal);
+        markEdgeExecutable(BB, SI->case_begin().getCaseSuccessor());
+        return true;
+      }
+      markForcedConstant(SI->getCondition(), FirstVal);
+      return true;
+
+    }
   }
 
   return false;
@@ -1854,6 +1886,8 @@ bool IPSCCP::runOnModule(Module &M) {
             assert(BI->isConditional() && isa<UndefValue>(BI->getCondition()) &&
                    "Branch should be foldable!");
           } else if (SwitchInst *SI = dyn_cast<SwitchInst>(I)) {
+            assert(isa<UndefValue>(SI->getCondition()) && "Switch should fold");
+          } else if (SwitchRInst *SI = dyn_cast<SwitchRInst>(I)){
             assert(isa<UndefValue>(SI->getCondition()) && "Switch should fold");
           } else {
             llvm_unreachable("Didn't fold away reference to block!");

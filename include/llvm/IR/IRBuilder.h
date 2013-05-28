@@ -521,6 +521,15 @@ public:
                                    BranchWeights));
   }
 
+  /// CreateSwitch - Create a switch instruction with the specified value,
+  /// default dest, and with a hint for the number of cases that will be added
+  /// (for efficient allocation).
+  SwitchRInst *CreateSwitchR(Value *V, SwitchRInst::CasesArrayRef Cases,
+                           MDNode *BranchWeights = 0) {
+    return Insert(addBranchWeights(SwitchRInst::Create(V, Cases),
+                                   BranchWeights));
+  }
+
   /// \brief Create an indirect branch instruction with the specified address
   /// operand, with an optional hint for the number of destinations that will be
   /// added (for efficient allocation).

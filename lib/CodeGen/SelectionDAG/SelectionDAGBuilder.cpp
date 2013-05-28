@@ -46,6 +46,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ConstantRange.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/IntegersSubsetMapping.h"
@@ -2520,6 +2521,97 @@ size_t SelectionDAGBuilder::Clusterify(CaseVector& Cases,
   return numCmps;
 }
 
+/// Clusterify - Transform simple list of Cases into list of CaseRange's
+size_t SelectionDAGBuilder::Clusterify(CaseVector& Cases,
+                                       const BasicBlock* TreatAsDefault,
+                                       const SwitchRInst& SI) {
+
+  size_t numCmps = 0;
+
+  BranchProbabilityInfo *BPI = FuncInfo.BPI;
+
+  SmallVector<unsigned, 32> WeightPerRange;
+
+  for (unsigned s = 0, e = SI.getNumSuccessors(); s != e; ++s) {
+    unsigned W = BPI ? BPI->getEdgeWeight(SI.getParent(), s) : 0;
+    WeightPerRange.push_back(W / SI.getNumRanges(s));
+  }
+
+  // Add all clusters except the wrapped case.
+  SwitchRInst::ConstCaseIt WrappedCase = --(SI.case_end());
+
+  for (SwitchRInst::ConstCaseIt i = SI.case_begin();
+       i != WrappedCase; ++numCmps, ++i) {
+
+    ConstantRange CR = i.getCaseRange();
+    const BasicBlock *BB = i.getCaseSuccessor();
+
+    // Skip default case:
+    if (BB == TreatAsDefault) {
+      --numCmps;
+      continue;
+    }
+
+    unsigned ClusterWeight = WeightPerRange[i.getSuccessorIndex()];
+
+    MachineBasicBlock *SMBB = FuncInfo.MBBMap[BB];
+
+    ConstantInt *CILow = cast<ConstantInt>(
+        ConstantInt::get(SI.getContext(), CR.getLower()));
+    ConstantInt *CIHigh = cast<ConstantInt>(
+        ConstantInt::get(SI.getContext(), CR.getUpper()-1));
+
+    Cases.push_back(Case(CILow, CIHigh, SMBB, ClusterWeight));
+
+    if (!i.isSingleElement())
+      // A range counts double, since it requires two compares.
+      ++numCmps;
+  }
+
+  // Now, deal with wrapped case.
+
+  if (WrappedCase.getCaseSuccessor() == TreatAsDefault)
+    return numCmps;
+
+  MachineBasicBlock *SMBB = FuncInfo.MBBMap[WrappedCase.getCaseSuccessor()];
+  ConstantRange CR = WrappedCase.getCaseRange();
+
+  unsigned ClusterWeight = WeightPerRange[WrappedCase.getSuccessorIndex()];
+  if (ClusterWeight > 1)
+    ClusterWeight /= 2;
+
+  unsigned BitWidth = CR.getUpper().getBitWidth();
+  APInt MaxVal = APInt::getMaxValue(BitWidth);
+  APInt MinVal = APInt::getMinValue(BitWidth);
+
+  ++numCmps;
+  if (CR.getLower() != MaxVal)
+    ++numCmps;
+
+  ConstantInt *CILow = cast<ConstantInt>(
+      ConstantInt::get(SI.getContext(), CR.getLower()));
+  ConstantInt *CIHigh = cast<ConstantInt>(
+      ConstantInt::get(SI.getContext(), MaxVal));
+
+  Cases.push_back(Case(CILow, CIHigh, SMBB, ClusterWeight));
+
+  if (CR.getUpper() == MinVal)
+    return numCmps;
+
+  ++numCmps;
+  if (MinVal != CR.getUpper()-1)
+    ++numCmps;
+
+  CILow = cast<ConstantInt>(
+      ConstantInt::get(SI.getContext(), MinVal));
+  CIHigh = cast<ConstantInt>(
+      ConstantInt::get(SI.getContext(), CR.getUpper()-1));
+
+  Cases.insert(Cases.begin(), Case(CILow, CIHigh, SMBB, ClusterWeight));
+
+  return numCmps;
+}
+
 void SelectionDAGBuilder::UpdateSplitBlock(MachineBasicBlock *First,
                                            MachineBasicBlock *Last) {
   // Update JTCases.
@@ -2560,6 +2652,85 @@ void SelectionDAGBuilder::visitSwitch(const SwitchInst &SI) {
   // create a binary search tree from them.
   CaseVector Cases;
   size_t numCmps = Clusterify(Cases, SI);
+  DEBUG(dbgs() << "Clusterify finished. Total clusters: " << Cases.size()
+               << ". Total compares: " << numCmps << '\n');
+  (void)numCmps;
+
+  // Get the Value to be switched on and default basic blocks, which will be
+  // inserted into CaseBlock records, representing basic blocks in the binary
+  // search tree.
+  const Value *SV = SI.getCondition();
+
+  // Push the initial CaseRec onto the worklist
+  CaseRecVector WorkList;
+  WorkList.push_back(CaseRec(SwitchMBB,0,0,
+                             CaseRange(Cases.begin(),Cases.end())));
+
+  while (!WorkList.empty()) {
+    // Grab a record representing a case range to process off the worklist
+    CaseRec CR = WorkList.back();
+    WorkList.pop_back();
+
+    if (handleBitTestsSwitchCase(CR, WorkList, SV, Default, SwitchMBB))
+      continue;
+
+    // If the range has few cases (two or less) emit a series of specific
+    // tests.
+    if (handleSmallSwitchRange(CR, WorkList, SV, Default, SwitchMBB))
+      continue;
+
+    // If the switch has more than N blocks, and is at least 40% dense, and the
+    // target supports indirect branches, then emit a jump table rather than
+    // lowering the switch to a binary tree of conditional branches.
+    // N defaults to 4 and is controlled via TLS.getMinimumJumpTableEntries().
+    if (handleJTSwitchCase(CR, WorkList, SV, Default, SwitchMBB))
+      continue;
+
+    // Emit binary tree. We need to pick a pivot, and push left and right ranges
+    // onto the worklist. Leafs are handled via handleSmallSwitchRange() call.
+    handleBTSplitSwitchCase(CR, WorkList, SV, Default, SwitchMBB);
+  }
+}
+
+void SelectionDAGBuilder::visitSwitchR(const SwitchRInst &SI) {
+  MachineBasicBlock *SwitchMBB = FuncInfo.MBB;
+
+  // Figure out which block is immediately after the current one.
+  MachineBasicBlock *NextBlock = 0;
+
+  // Found the biggest range and treat it as default.
+  SwitchRInst::ConstCaseIt WrappedCase = --(SI.case_end());
+  SwitchRInst::ConstCaseIt DefaultCase = WrappedCase;
+  for (SwitchRInst::ConstCaseIt DefCandidate = SI.case_begin();
+       DefCandidate != WrappedCase; ++DefCandidate) {
+    if (DefCandidate.getCaseRange().getSetSize().ugt(
+          DefaultCase.getCaseRange().getSetSize()
+        )) {
+      DefaultCase = DefCandidate;
+    }
+  }
+  MachineBasicBlock *Default = FuncInfo.MBBMap[DefaultCase.getCaseSuccessor()];
+
+  // If there is only the default destination, branch to it if it is not the
+  // next basic block.  Otherwise, just fall through.
+  if (SI.getNumCases() < 2) {
+    // Update machine-CFG edges.
+
+    // If this is not a fall-through branch, emit the branch.
+    SwitchMBB->addSuccessor(Default);
+    if (Default != NextBlock)
+      DAG.setRoot(DAG.getNode(ISD::BR, getCurDebugLoc(),
+                              MVT::Other, getControlRoot(),
+                              DAG.getBasicBlock(Default)));
+
+    return;
+  }
+
+  // If there are any non-default case statements, create a vector of Cases
+  // representing each one, and sort the vector so that we can efficiently
+  // create a binary search tree from them.
+  CaseVector Cases;
+  std::size_t numCmps = Clusterify(Cases, DefaultCase.getCaseSuccessor(), SI);
   DEBUG(dbgs() << "Clusterify finished. Total clusters: " << Cases.size()
                << ". Total compares: " << numCmps << '\n');
   (void)numCmps;
