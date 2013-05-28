@@ -35,6 +35,7 @@
 #include "llvm/IR/TypeFinder.h"
 #include "llvm/IR/ValueSymbolTable.h"
 #include "llvm/Support/CFG.h"
+#include "llvm/Support/ConstantRange.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -1252,6 +1253,23 @@ void AssemblyWriter::writeAtomic(AtomicOrdering Ordering,
   }
 }
 
+void AssemblyWriter::writeRawInt(const APInt& V, bool PrintType) {
+  unsigned BitWidth = V.getBitWidth();
+  if (PrintType) {
+    Type* ValType = IntegerType::get(getGlobalContext(), BitWidth);
+
+    TypePrinter.print(ValType, Out);
+    Out << ' ';
+  }
+  if (BitWidth == 1) {
+    Out << (V.getZExtValue() ? "true" : "false");
+    return;
+  }
+  Out << V;
+  return;
+}
+
+
 void AssemblyWriter::writeParamOperand(const Value *Operand,
                                        AttributeSet Attrs, unsigned Idx) {
   if (Operand == 0) {
@@ -1817,6 +1835,31 @@ void AssemblyWriter::printInstruction(const Instruction &I) {
       writeOperand(i.getCaseValue(), true);
       Out << ", ";
       writeOperand(i.getCaseSuccessor(), true);
+    }
+    Out << "\n  ]";
+  } else if (isa<SwitchRInst>(I)) {
+    const SwitchRInst& SI(cast<SwitchRInst>(I));
+    // Special case switch instruction to get formatting nice and correct.
+    Out << ' ';
+    writeOperand(SI.getCondition(), true);
+    Out << " [";
+    for (SwitchRInst::ConstCaseIt
+         i = SI.case_begin(), e = SI.case_end(); i !=e; ++i) {
+      if (!i.isSingleElement()) {
+        Out << "\n    [";
+        ConstantRange CR = i.getCaseRange();
+        writeRawInt(CR.getLower(), true);
+        Out << " ... ";
+        writeRawInt(CR.getUpper(), true);
+        Out << "), ";
+        writeOperand(i.getCaseSuccessor(), true);
+      } else {
+        Out << "\n    ";
+        ConstantRange CR = i.getCaseRange();
+        writeRawInt(CR.getLower(), true);
+        Out << ", ";
+        writeOperand(i.getCaseSuccessor(), true);
+      }
     }
     Out << "\n  ]";
   } else if (isa<IndirectBrInst>(I)) {

@@ -91,6 +91,7 @@ public:
   void writeOperand(const Value *Op, bool PrintType);
   void writeParamOperand(const Value *Operand, AttributeSet Attrs,unsigned Idx);
   void writeAtomic(AtomicOrdering Ordering, SynchronizationScope SynchScope);
+  void writeRawInt(const APInt& V, bool PrintType);
 
   void writeAllMDNodes();
   void writeMDNode(unsigned Slot, const MDNode *Node);

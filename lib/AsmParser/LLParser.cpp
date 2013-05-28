@@ -22,6 +22,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/ValueSymbolTable.h"
+#include "llvm/Support/ConstantRange.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 using namespace llvm;
@@ -3233,6 +3234,7 @@ int LLParser::ParseInstruction(Instruction *&Inst, BasicBlock *BB,
   case lltok::kw_ret:         return ParseRet(Inst, BB, PFS);
   case lltok::kw_br:          return ParseBr(Inst, PFS);
   case lltok::kw_switch:      return ParseSwitch(Inst, PFS);
+  case lltok::kw_switchr:     return ParseSwitchR(Inst, PFS);
   case lltok::kw_indirectbr:  return ParseIndirectBr(Inst, PFS);
   case lltok::kw_invoke:      return ParseInvoke(Inst, PFS);
   case lltok::kw_resume:      return ParseResume(Inst, PFS);
@@ -3466,6 +3468,168 @@ bool LLParser::ParseSwitch(Instruction *&Inst, PerFunctionState &PFS) {
   SwitchInst *SI = SwitchInst::Create(Cond, DefaultBB, Table.size());
   for (unsigned i = 0, e = Table.size(); i != e; ++i)
     SI->addCase(Table[i].first, Table[i].second);
+  Inst = SI;
+  return false;
+}
+
+/// ParseSwitchR
+///  Instruction
+///    ::= 'switchr' TypeAndValue ' [' JumpTable ']'
+///  JumpTable
+///    ::= Case*
+///  Case
+///    ::= (CaseRange ',' Label) | (TypeAndValue ',' Label) 
+///  CaseRange
+///    ::= '[' TypeAndValue '...' TypeAndValue ')'
+///
+/// Example:
+//  switchr  i8 %f [
+//           [i8 0  ... i8 5),  label %L0
+//           [i8 5  ... i8 10), label %L1
+//           [i8 10 ... i8 0),  label %L2  ;wrapped range
+//  ]
+
+struct SwitchRCase {
+  SwitchRCase(ConstantRange _CR, BasicBlock *_BB) : CR(_CR), BB(_BB) {}
+  ConstantRange CR;
+  BasicBlock *BB;
+};
+
+struct SwitchRCaseCmp {
+  bool operator()(const std::pair<SwitchRCase, LLParser::LocTy> &LHS,
+                  const std::pair<SwitchRCase, LLParser::LocTy> &RHS) {
+    if (LHS.first.CR.getLower().ult(RHS.first.CR.getLower()))
+      return true;
+    if (RHS.first.CR.getLower().ult(LHS.first.CR.getLower()))
+      return false;
+    return (LHS.first.CR.getSetSize().ult(RHS.first.CR.getSetSize()));
+  }
+};
+
+bool LLParser::ParseSwitchR(Instruction *&Inst, PerFunctionState &PFS) {
+  LocTy CondLoc, BBLoc;
+  Value *Cond;
+  if (ParseTypeAndValue(Cond, CondLoc, PFS) ||
+      ParseToken(lltok::lsquare, "expected '[' with switch table"))
+    return true;
+
+  if (!Cond->getType()->isIntegerTy())
+    return Error(CondLoc, "switch condition must have integer type");
+
+  // Parse jump table ranges
+
+  SmallVector<std::pair<SwitchRCase, LocTy>, 32> ParsedCases;
+  while (Lex.getKind() != lltok::rsquare) {
+    Type* Ty;
+    ValID ID;
+    APInt Lower;
+    APInt Upper;
+    BasicBlock *DestBB;
+    LocTy CaseLoc;
+
+    if (Lex.getKind() == lltok::lsquare) {
+      if (ParseToken(lltok::lsquare, "expected '[' that opens range"))
+         return true;
+      CondLoc = Lex.getLoc();
+      CaseLoc = Lex.getLoc();
+      if (ParseType(Ty) || ParseValID(ID, &PFS))
+        return Error(CondLoc, "can't parse lower bound.");
+      if (ID.Kind != ValID::t_APSInt)
+        return Error(CondLoc, "incorrect type");
+      if (Ty != Cond->getType())
+        return Error(CondLoc, "incorrect type");
+
+      Lower = ID.APSIntVal.extOrTrunc(Ty->getPrimitiveSizeInBits());
+
+      if (ParseToken(lltok::dotdotdot, "expected '...' after lower bound"))
+        return true;
+
+      CondLoc = Lex.getLoc();
+      if (ParseType(Ty) || ParseValID(ID, &PFS))
+        return Error(CondLoc, "can't parse upper bound.");
+      if (ID.Kind != ValID::t_APSInt)
+        return Error(CondLoc, "value should be an integer");
+      if (Ty != Cond->getType())
+        return Error(CondLoc, "value should be an integer");
+
+      Upper = ID.APSIntVal.extOrTrunc(Ty->getPrimitiveSizeInBits());
+
+      if (ParseToken(lltok::rparen, "expected ')' that closes range"))
+        return true; 
+    } else {
+      // Try parse single number case.
+      CondLoc = Lex.getLoc();
+      CaseLoc = Lex.getLoc();
+      if (ParseType(Ty) || ParseValID(ID, &PFS))
+          return Error(CondLoc, "can't parse single number case");
+      if (ID.Kind != ValID::t_APSInt)
+        return Error(CondLoc, "value should be an integer");
+      if (Ty != Cond->getType())
+        return Error(CondLoc, "value should be an integer");
+
+      Upper = Lower = ID.APSIntVal.extOrTrunc(Ty->getPrimitiveSizeInBits());
+      ++Upper;
+    }
+    
+    if (ParseToken(lltok::comma, "expected ',' after case range") ||
+        ParseTypeAndBasicBlock(DestBB, PFS))
+      return true;
+    
+    ParsedCases.push_back(std::make_pair(
+        SwitchRCase(ConstantRange(Lower, Upper), DestBB), CaseLoc));
+  }
+
+  // No matter what will inside until real wrapped case will handler.
+  ConstantRange WrappedCR(ParsedCases.front().first.CR);
+  bool WrappedCaseHanlded = false;
+
+  for (SmallVectorImpl<std::pair<SwitchRCase, LocTy> >::iterator
+       i = ParsedCases.begin(), e = ParsedCases.end(); i != e; ++i) {
+    if (i->first.CR.isWrappedSet() || i->first.CR.isEmptySet()) {
+      if (WrappedCaseHanlded)
+        return Error(i->second, "Only one wrapped case is allowed.");
+      WrappedCaseHanlded = true;
+      WrappedCR = i->first.CR;
+    }
+  }
+
+  std::sort(ParsedCases.begin(), ParsedCases.end(), SwitchRCaseCmp());
+
+  SmallVector<std::pair<ConstantRange, BasicBlock*>, 32 > Cases;
+
+  for (SmallVectorImpl<std::pair<SwitchRCase, LocTy> >::iterator
+       i = ParsedCases.begin(), p = i, e = ParsedCases.end(); i != e; p = i++) {
+
+    Cases.push_back(std::make_pair(i->first.CR, i->first.BB));
+
+    // Skip the wrapped case by now.
+    if (i->first.CR.isWrappedSet() || i->first.CR.isEmptySet())
+      continue;
+
+    ConstantRange &CR = i->first.CR;
+    ConstantRange &PrevCR = p->first.CR;
+
+    // Check non-wrapped cases.
+    if (p != i && PrevCR.getUpper().ugt(CR.getLower()))
+      return Error(i->second, "This case is overlapped.");
+
+    // Now check for overlapping with wrapped case.
+    if (!WrappedCaseHanlded)
+      continue;
+    if (CR.getLower().ult(WrappedCR.getUpper()) &&
+        CR.getUpper().ugt(WrappedCR.getUpper())) {
+      return Error(i->second, "This case is overlapped with wrapper case.");
+    }
+    if (CR.getLower().ult(WrappedCR.getLower()) &&
+        CR.getUpper().ugt(WrappedCR.getLower())) {
+      return Error(i->second, "This case is overlapped with wrapper case.");
+    }
+  }
+
+  Lex.Lex();  // Eat the ']'.
+
+  SwitchRInst *SI = SwitchRInst::Create(Cond, Cases);
+
   Inst = SI;
   return false;
 }

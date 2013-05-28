@@ -374,6 +374,7 @@ namespace llvm {
     bool ParseRet(Instruction *&Inst, BasicBlock *BB, PerFunctionState &PFS);
     bool ParseBr(Instruction *&Inst, PerFunctionState &PFS);
     bool ParseSwitch(Instruction *&Inst, PerFunctionState &PFS);
+    bool ParseSwitchR(Instruction *&Inst, PerFunctionState &PFS);
     bool ParseIndirectBr(Instruction *&Inst, PerFunctionState &PFS);
     bool ParseInvoke(Instruction *&Inst, PerFunctionState &PFS);
     bool ParseResume(Instruction *&Inst, PerFunctionState &PFS);
