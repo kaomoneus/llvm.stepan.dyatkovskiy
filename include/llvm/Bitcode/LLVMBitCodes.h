@@ -323,8 +323,15 @@ namespace bitc {
     FUNC_CODE_INST_LANDINGPAD  = 40, // LANDINGPAD: [ty,val,val,num,id0,val0...]
     FUNC_CODE_INST_LOADATOMIC  = 41, // LOAD: [opty, op, align, vol,
                                      //        ordering, synchscope]
-    FUNC_CODE_INST_STOREATOMIC = 42  // STORE: [ptrty,ptr,val, align, vol
+    FUNC_CODE_INST_STOREATOMIC = 42, // STORE: [ptrty,ptr,val, align, vol
                                      //         ordering, synchscope]
+    FUNC_CODE_INST_SWITCHR     = 43  // SWITCHR: [header, opty, Cond, NumRanges,
+                                     //           [v0-active-words,] v0, BB0,
+                                     //           [v1-active-words,] v1, BB1, ...]
+                                     // vx-active-words are emitted if type
+                                     // larger than 64 bits.
+                                     // header =
+                                     // (record_size << 32) | (hash << 16)
   };
 
   enum UseListCodes {

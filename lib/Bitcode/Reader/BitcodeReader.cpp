@@ -19,6 +19,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/OperandTraits.h"
 #include "llvm/IR/Operator.h"
+#include "llvm/Support/ConstantRange.h"
 #include "llvm/Support/DataStream.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -2440,6 +2441,91 @@ bool BitcodeReader::ParseFunctionBody(Function *F) {
       I = SI;
       break;
     }
+    case bitc::FUNC_CODE_INST_SWITCHR: {
+      // SWITCHR: [header, opty, Cond, NumRanges,
+      //           [v0-active-words,] v0, BB0,
+      //           [v1-active-words,] v1, BB1, ...]
+      // vx-active-words are emitted if type
+      // larger than 64 bits.
+      // header =
+      // (record_size << 32) | (hash << 16)
+
+      uint64_t RecIdx = 1;
+      Type *OpTy = getTypeByID(Record[RecIdx++]);
+      unsigned ValueBitWidth = cast<IntegerType>(OpTy)->getBitWidth();
+
+      if (!OpTy->isIntegerTy())
+        return Error("Invalid SWITCHR: SWITCHR works with integer types only.");
+
+      Value *Cond = getValue(Record, RecIdx++, NextValueNo, OpTy);
+
+      if (OpTy == 0 || Cond == 0)
+        return Error("Invalid SWITCHR record");
+
+      unsigned NumRanges = Record[RecIdx++];
+
+      if (!NumRanges)
+        return Error("Invalid SWITCHR record: wrong ranges number");
+
+      SmallVector<std::pair<ConstantRange, BasicBlock*>, 32 > Cases;
+
+      unsigned ActiveWords = ValueBitWidth <= 64 ? 1 : Record[RecIdx++];
+
+      APInt FirstReadValue =
+          ReadWideAPInt(makeArrayRef(&Record[RecIdx], ActiveWords),
+                        ValueBitWidth);
+      RecIdx += ActiveWords;
+      
+      APInt LastLower = FirstReadValue;
+
+      BasicBlock *DestBB = getBasicBlock(Record[RecIdx++]);
+
+      for (unsigned i = 1; i != NumRanges; ++i) {
+        ActiveWords = ValueBitWidth <= 64 ? 1 : Record[RecIdx++];
+        APInt V = ReadWideAPInt(makeArrayRef(&Record[RecIdx], ActiveWords),
+                                ValueBitWidth);
+        RecIdx += ActiveWords;
+
+        if (DestBB != 0)
+          Cases.push_back(std::make_pair(ConstantRange(LastLower, V), DestBB));
+
+        DestBB = getBasicBlock(Record[RecIdx++]);
+
+        LastLower = V;
+      }
+
+      if (Cases.empty()) {
+        // The only wrapped range is in this Switch. Well...
+        // let optimizer will replace it with unconditional br.
+        // But here we emit switchr with single destination,
+        // even if its strange.
+        ConstantRange wrapped(
+            APInt::getMinValue(LastLower.getBitWidth()),
+            APInt::getMinValue(LastLower.getBitWidth()));
+        Cases.push_back(std::make_pair(wrapped, DestBB));
+      } else {
+        ConstantRange wrapped(LastLower, FirstReadValue);
+        Cases.push_back(std::make_pair(wrapped, DestBB));
+      }
+      
+      uint32_t StoredRecordLength32 = Record[0] >> 32;
+      if (StoredRecordLength32 != RecIdx & 0xffffffff)
+        return Error("Invalid SWITCHR record length.");
+
+      SwitchRInst *SI = SwitchRInst::Create(Cond, Cases);
+      InstructionList.push_back(SI);
+
+      uint64_t Header = (RecIdx << 32) | ((uint64_t)SI->hash() << 16);
+      if (Header != Record[0]) {
+        delete SI;
+        return Error("Invalid SWITCHR hash.");
+      }
+
+      I = SI;
+
+      break;
+    }
+
     case bitc::FUNC_CODE_INST_INDIRECTBR: { // INDIRECTBR: [opty, op0, op1, ...]
       if (Record.size() < 2)
         return Error("Invalid INDIRECTBR record");

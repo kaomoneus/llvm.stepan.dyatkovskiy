@@ -24,6 +24,7 @@
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/ValueSymbolTable.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ConstantRange.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Program.h"
@@ -1288,6 +1289,57 @@ static void WriteInstruction(const Instruction &I, unsigned InstID,
       return;
     }
     break;
+  case Instruction::SwitchR:
+      {
+        // Redefine Vals, since here we need to use 64 bit values
+        // explicitly to store large APInt numbers.
+        SmallVector<uint64_t, 128> Vals64;
+
+        Code = bitc::FUNC_CODE_INST_SWITCHR;
+        const SwitchRInst &SI = cast<const SwitchRInst>(I);
+        unsigned StoredRangesCount = SI.getNumRanges();
+        const uint64_t BadBBID = (uint64_t)(-1);
+
+        unsigned HeaderIdx = Vals64.size();
+        Vals64.push_back(0);
+
+        Vals64.push_back(VE.getTypeID(SI.getCondition()->getType()));
+        pushValue64(SI.getCondition(), InstID, Vals64, VE);
+
+        unsigned NumRangesIdx = Vals64.size();
+        Vals64.push_back(BadBBID);
+
+        APInt LastUpper = (--SI.case_end()).getCaseRange().getUpper();
+        for (SwitchRInst::ConstCaseIt i = SI.case_begin(), e = SI.case_end();
+             i != e; ++i) {
+          unsigned Code, Abbrev; // will unused.
+
+          ConstantRange CR = i.getCaseRange();
+
+          if (LastUpper != CR.getLower()) {
+            // Hole in ranges detected. Emit number with empty successor.
+            EmitAPInt(Vals64, Code, Abbrev, LastUpper, true);
+            Vals64.push_back(BadBBID); // DestBB = 0
+            ++StoredRangesCount;
+          }
+
+          EmitAPInt(Vals64, Code, Abbrev, CR.getLower(), true);
+          Vals64.push_back(VE.getValueID(i.getCaseSuccessor()));
+
+          LastUpper = CR.getUpper();
+        }
+        Vals64[NumRangesIdx] = StoredRangesCount;
+
+        uint64_t RecordLength = Vals64.size();
+        Vals64[HeaderIdx] = (RecordLength << 32) | ((uint64_t)SI.hash() << 16);
+
+        Stream.EmitRecord(Code, Vals64, AbbrevToUse);
+
+        // Also do expected action - clear external Vals collection:
+        Vals.clear();
+        return;
+      }
+      break;    
   case Instruction::IndirectBr:
     Code = bitc::FUNC_CODE_INST_INDIRECTBR;
     Vals.push_back(VE.getTypeID(I.getOperand(0)->getType()));
