@@ -2719,7 +2719,7 @@ void SelectionDAGBuilder::visitSwitchR(const SwitchRInst &SI) {
     // If this is not a fall-through branch, emit the branch.
     SwitchMBB->addSuccessor(Default);
     if (Default != NextBlock)
-      DAG.setRoot(DAG.getNode(ISD::BR, getCurDebugLoc(),
+      DAG.setRoot(DAG.getNode(ISD::BR, getCurSDLoc(),
                               MVT::Other, getControlRoot(),
                               DAG.getBasicBlock(Default)));
 
