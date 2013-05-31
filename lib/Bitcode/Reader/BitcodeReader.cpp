@@ -2442,14 +2442,21 @@ bool BitcodeReader::ParseFunctionBody(Function *F) {
       break;
     }
     case bitc::FUNC_CODE_INST_SWITCHR: {
-      // SWITCHR: [header, opty, Cond, NumRanges,
-      //           [v0-active-words,] v0, BB0,
-      //           [v1-active-words,] v1, BB1, ...]
-      // vx-active-words are emitted if type
+      // SWITCHR: [header, opty, Cond,
+      //           NumSuccessors,
+      //           NumRanges,
+      //           BB0, BB1, ..
+      //           [Lower0-active-words,] Lower0,
+      //           [Lower1-active-words,] Lower1,
+      //           ...
+      // LowerX-active-words are emitted if type
       // larger than 64 bits.
       // header =
       // (record_size << 32) | (hash << 16)
 
+      // 1. Wait with header by now.
+
+      // 2. Read type.
       uint64_t RecIdx = 1;
       Type *OpTy = getTypeByID(Record[RecIdx++]);
       unsigned ValueBitWidth = cast<IntegerType>(OpTy)->getBitWidth();
@@ -2457,17 +2464,28 @@ bool BitcodeReader::ParseFunctionBody(Function *F) {
       if (!OpTy->isIntegerTy())
         return Error("Invalid SWITCHR: SWITCHR works with integer types only.");
 
+      // 3. Read condition.
       Value *Cond = getValue(Record, RecIdx++, NextValueNo, OpTy);
 
       if (OpTy == 0 || Cond == 0)
         return Error("Invalid SWITCHR record");
 
+      // 4. Read NumSuccessors;
+      unsigned NumSuccessors = Record[RecIdx++];
+
+      // 5. Read NumRanges
       unsigned NumRanges = Record[RecIdx++];
 
       if (!NumRanges)
         return Error("Invalid SWITCHR record: wrong ranges number");
 
-      SmallVector<std::pair<ConstantRange, BasicBlock*>, 32 > Cases;
+      // 6. Read Successors itself.
+      SmallVector<BasicBlock*, 32> Successors;
+      for (unsigned i = 0; i != NumSuccessors; ++i)
+        Successors.push_back(getBasicBlock(Record[RecIdx++]));
+
+      // 7. Load flat array of numbers and convert it to Ranges:
+      SmallVector<std::pair<ConstantRange, unsigned>, 32 > Cases;
 
       unsigned ActiveWords = ValueBitWidth <= 64 ? 1 : Record[RecIdx++];
 
@@ -2475,10 +2493,11 @@ bool BitcodeReader::ParseFunctionBody(Function *F) {
           ReadWideAPInt(makeArrayRef(&Record[RecIdx], ActiveWords),
                         ValueBitWidth);
       RecIdx += ActiveWords;
-      
+
       APInt LastLower = FirstReadValue;
 
-      BasicBlock *DestBB = getBasicBlock(Record[RecIdx++]);
+      const uint64_t BadBBID = (uint64_t)(-1);
+      uint64_t SuccessorIndex = Record[RecIdx++];
 
       for (unsigned i = 1; i != NumRanges; ++i) {
         ActiveWords = ValueBitWidth <= 64 ? 1 : Record[RecIdx++];
@@ -2486,10 +2505,11 @@ bool BitcodeReader::ParseFunctionBody(Function *F) {
                                 ValueBitWidth);
         RecIdx += ActiveWords;
 
-        if (DestBB != 0)
-          Cases.push_back(std::make_pair(ConstantRange(LastLower, V), DestBB));
+        if (SuccessorIndex != BadBBID)
+          Cases.push_back(std::make_pair(
+                          ConstantRange(LastLower, V), SuccessorIndex));
 
-        DestBB = getBasicBlock(Record[RecIdx++]);
+        SuccessorIndex = Record[RecIdx++];
 
         LastLower = V;
       }
@@ -2502,17 +2522,19 @@ bool BitcodeReader::ParseFunctionBody(Function *F) {
         ConstantRange wrapped(
             APInt::getMinValue(LastLower.getBitWidth()),
             APInt::getMinValue(LastLower.getBitWidth()));
-        Cases.push_back(std::make_pair(wrapped, DestBB));
+        Cases.push_back(std::make_pair(wrapped, SuccessorIndex));
       } else {
         ConstantRange wrapped(LastLower, FirstReadValue);
-        Cases.push_back(std::make_pair(wrapped, DestBB));
+        Cases.push_back(std::make_pair(wrapped, SuccessorIndex));
       }
-      
+
+      // 8. Back to stage 1: check the header.
+
       uint32_t StoredRecordLength32 = Record[0] >> 32;
-      if (StoredRecordLength32 != RecIdx & 0xffffffff)
+      if (StoredRecordLength32 != (RecIdx & 0xffffffff))
         return Error("Invalid SWITCHR record length.");
 
-      SwitchRInst *SI = SwitchRInst::Create(Cond, Cases);
+      SwitchRInst *SI = SwitchRInst::Create(Cond, Successors, Cases);
       InstructionList.push_back(SI);
 
       uint64_t Header = (RecIdx << 32) | ((uint64_t)SI->hash() << 16);

@@ -1297,17 +1297,33 @@ static void WriteInstruction(const Instruction &I, unsigned InstID,
 
         Code = bitc::FUNC_CODE_INST_SWITCHR;
         const SwitchRInst &SI = cast<const SwitchRInst>(I);
+        unsigned SuccessorsCount = SI.getNumSuccessors();
         unsigned StoredRangesCount = SI.getNumRanges();
         const uint64_t BadBBID = (uint64_t)(-1);
 
+        // 1. Push header.
         unsigned HeaderIdx = Vals64.size();
         Vals64.push_back(0);
 
+        // 2. Push type.
         Vals64.push_back(VE.getTypeID(SI.getCondition()->getType()));
+
+        // 3. Push condition.
         pushValue64(SI.getCondition(), InstID, Vals64, VE);
 
+        // 4. Emit NumSuccessors.
+        Vals64.push_back(SuccessorsCount);
+
+        // 5. Emit NumRanges stub by now.
         unsigned NumRangesIdx = Vals64.size();
-        Vals64.push_back(BadBBID);
+        Vals64.push_back(0);
+
+        // 6. Emit Successors itself.
+        for (unsigned i = 0; i != SuccessorsCount; ++i)
+          Vals64.push_back(VE.getValueID(SI.getSuccessor(i)));
+
+        // 7. Emit Ranges as flat array of numbers:
+        // Lower = V[i], Upper = V[i+1]
 
         APInt LastUpper = (--SI.case_end()).getCaseRange().getUpper();
         for (SwitchRInst::ConstCaseIt i = SI.case_begin(), e = SI.case_end();
@@ -1324,12 +1340,15 @@ static void WriteInstruction(const Instruction &I, unsigned InstID,
           }
 
           EmitAPInt(Vals64, Code, Abbrev, CR.getLower(), true);
-          Vals64.push_back(VE.getValueID(i.getCaseSuccessor()));
+          Vals64.push_back(i.getSuccessorIndex());
 
           LastUpper = CR.getUpper();
         }
+
+        // 8. Back to stage 5: Now we know how many ranges are stored actually.
         Vals64[NumRangesIdx] = StoredRangesCount;
 
+        // 9. Emit header
         uint64_t RecordLength = Vals64.size();
         Vals64[HeaderIdx] = (RecordLength << 32) | ((uint64_t)SI.hash() << 16);
 

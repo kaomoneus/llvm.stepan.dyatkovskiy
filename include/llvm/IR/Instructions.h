@@ -2867,7 +2867,9 @@ class SwitchRInst : public TerminatorInst {
 
   /// Declare array of cases type for best readability
 public:
-  typedef ArrayRef<std::pair<ConstantRange, BasicBlock*> > CasesArrayRef;
+  typedef ArrayRef<BasicBlock*> SuccessorsArrayRef;
+  typedef SuccessorsArrayRef::iterator SuccessorsArrayRefIt;
+  typedef ArrayRef<std::pair<ConstantRange, unsigned> > CasesArrayRef;
   typedef CasesArrayRef::iterator CasesArrayRefIt;
 private:
 
@@ -2899,7 +2901,7 @@ private:
   static const unsigned TombstoneSuccessorIndex = static_cast<unsigned>(~0L-2);
 
   SwitchRInst(const SwitchRInst &SI);
-  void init(Value *Value, CasesArrayRef Cases, bool SortCases);
+  void init(Value *Value, SuccessorsArrayRef Successors, CasesArrayRef Cases);
   void growOperands();
   // allocate space for exactly zero operands
   void *operator new(size_t s) {
@@ -2908,33 +2910,33 @@ private:
 
   /// SwitchRInst ctor - Create a new switchr instruction, specifying a value to
   /// switchr on.
-  /// "Cases" should contain
-  /// non-empty non-overlapped ascending ordered set of range+successor pairs.
+  /// "Cases" should contain non-empty non-overlapped ascending ordered set of
+  /// [<range>, <successor index>] pairs.
   /// This constructor can also autoinsert before another instruction.
-  SwitchRInst(Value *Value, CasesArrayRef Cases, Instruction *InsertBefore,
-              bool SortCases = false);
+  SwitchRInst(Value *Value, SuccessorsArrayRef Successors, CasesArrayRef Cases,
+              Instruction *InsertBefore);
 
   /// SwitchRInst ctor - Create a new switchr instruction, specifying a value to
   /// switchr on.
-  /// "Cases" should contain
-  /// non-empty non-overlapped ascending ordered set of range+successor pairs.
+  /// "Cases" should contain non-empty non-overlapped ascending ordered set of
+  /// [<range>, <successor index>] pairs.
   /// This constructor also autoinserts at the end of the specified BasicBlock.
-  SwitchRInst(Value *Value, CasesArrayRef Cases, BasicBlock *InsertAtEnd,
-              bool SortCases = false);
+  SwitchRInst(Value *Value, SuccessorsArrayRef Successors, CasesArrayRef Cases,
+              BasicBlock *InsertAtEnd);
 
 protected:
   virtual SwitchRInst *clone_impl() const;
 public:
 
-  static SwitchRInst *Create(Value *Value,  CasesArrayRef Cases,
-                             Instruction *InsertBefore = 0,
-                             bool SortCases = false) {
-    return new SwitchRInst(Value, Cases, InsertBefore, SortCases);
+  static SwitchRInst *Create(Value *Value, SuccessorsArrayRef Successors,
+                             CasesArrayRef Cases,
+                             Instruction *InsertBefore = 0) {
+    return new SwitchRInst(Value, Successors, Cases, InsertBefore);
   }
-  static SwitchRInst *Create(Value *Value, CasesArrayRef Cases,
-                             BasicBlock *InsertAtEnd,
-                             bool SortCases = false) {
-    return new SwitchRInst(Value, Cases, InsertAtEnd, SortCases);
+  static SwitchRInst *Create(Value *Value, SuccessorsArrayRef Successors,
+                             CasesArrayRef Cases,
+                             BasicBlock *InsertAtEnd) {
+    return new SwitchRInst(Value, Successors, Cases, InsertAtEnd);
   }
 
   ~SwitchRInst();

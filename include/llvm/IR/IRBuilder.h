@@ -524,9 +524,11 @@ public:
   /// CreateSwitch - Create a switch instruction with the specified value,
   /// default dest, and with a hint for the number of cases that will be added
   /// (for efficient allocation).
-  SwitchRInst *CreateSwitchR(Value *V, SwitchRInst::CasesArrayRef Cases,
+  SwitchRInst *CreateSwitchR(Value *V,
+                             SwitchRInst::SuccessorsArrayRef Successors,
+                             SwitchRInst::CasesArrayRef Cases,
                            MDNode *BranchWeights = 0) {
-    return Insert(addBranchWeights(SwitchRInst::Create(V, Cases),
+    return Insert(addBranchWeights(SwitchRInst::Create(V, Successors, Cases),
                                    BranchWeights));
   }
 

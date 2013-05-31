@@ -18,6 +18,7 @@
 #define DEBUG_TYPE "switchtoswitchr"
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -51,6 +52,10 @@ namespace {
 
   private:
     void processSwitchInst(SwitchInst *SI);
+    void optimizeTerminator(Instruction* ToBeRemoved,
+                            Value* Condition,
+                            SwitchRInst::SuccessorsArrayRef Successors,
+                            SwitchRInst::CasesArrayRef Cases);
   };
 }
 
@@ -81,6 +86,17 @@ bool SwitchToSwitchR::runOnFunction(Function &F) {
   return Changed;
 }
 
+struct SwitchRCaseCmp {
+  bool operator()(const std::pair<ConstantRange, unsigned> &LHS,
+                  const std::pair<ConstantRange, unsigned> &RHS) {
+    if (LHS.first.getLower().ult(RHS.first.getLower()))
+      return true;
+    if (RHS.first.getLower().ult(LHS.first.getLower()))
+      return false;
+    return (LHS.first.getSetSize().ult(RHS.first.getSetSize()));
+  }
+};
+
 // processSwitchInst - Replace the specified switch instruction with a sequence
 // of chained if-then insts in a balanced binary search.
 //
@@ -97,11 +113,15 @@ void SwitchToSwitchR::processSwitchInst(SwitchInst *SI) {
     return;
   }
 
-  SmallVector<std::pair<ConstantRange, BasicBlock*>, 32 > Cases;
+  SmallVector<BasicBlock*, 32> Successors(SI->getNumSuccessors(), 0);
+  SmallVector<std::pair<ConstantRange, unsigned>, 32 > Cases;
+
+  for (unsigned i = 0, e = SI->getNumSuccessors(); i != e; ++i)
+    Successors[i] = SI->getSuccessor(i);
 
   // Note: Internally we treat empty set as full set too.
   ConstantRange FullSet(Val->getType()->getScalarSizeInBits(), false);
-  Cases.push_back(std::make_pair(FullSet, Default));
+  Cases.push_back(std::make_pair(FullSet, 0));
 
   for (SwitchInst::CaseIt
        i = SI->case_begin(), e = SI->case_end(); i != e; ++i) {
@@ -114,11 +134,62 @@ void SwitchToSwitchR::processSwitchInst(SwitchInst *SI) {
     else
       ++U;
 
-    Cases.push_back(std::make_pair(ConstantRange(L, U), i.getCaseSuccessor()));
+    Cases.push_back(std::make_pair(ConstantRange(L, U), i.getSuccessorIndex()));
   }
 
-  SwitchRInst::Create(Val, Cases, CurBlock, true /* Sort the cases */);
-  CurBlock->getInstList().erase(SI);
+  std::sort(Cases.begin(), Cases.end(), SwitchRCaseCmp());
+
+  optimizeTerminator(SI, Val, Successors, Cases);
+}
+
+struct MergeInfo {
+  MergeInfo() : Index((unsigned)(-1)), NumMergedIn((unsigned)(-1)) {}
+  MergeInfo(unsigned I, unsigned NMergedIn)
+  : Index(I), NumMergedIn(NMergedIn) {}
+  unsigned Index;
+  unsigned NumMergedIn; // How many duplicates were merged.
+};
+
+void SwitchToSwitchR::optimizeTerminator(
+    Instruction* ToBeRemoved,
+    Value* Condition,
+    SwitchRInst::SuccessorsArrayRef Successors,
+    SwitchRInst::CasesArrayRef Cases) {
+
+  // Don't like to read ab-ra-ca-da-bra::iterator, we better do typedef.
+  typedef DenseMap<BasicBlock*, MergeInfo> SuccessorsDenseMap;
+  typedef SuccessorsDenseMap::iterator SuccessorsDenseMapIt;
+
+  SuccessorsDenseMap SuccessorsMap;
+  SmallVector<std::pair<ConstantRange, unsigned>, 32 > NewCases;
+
+  // Analyze successors, calculate how many would be merged.
+  for (unsigned i = 0, e = Successors.size(); i != e; ++i) {
+    std::pair<SuccessorsDenseMapIt, bool> mapIt =
+        SuccessorsMap.insert(std::make_pair(
+            Successors[i], MergeInfo(SuccessorsMap.size(), 0)));
+    if (!mapIt.second)
+      ++mapIt.first->second.NumMergedIn;
+  }
+
+  // Create new cases array. Instead just re-index successors.
+  for (unsigned i = 0, e = Cases.size(); i != e; ++i) {
+    BasicBlock* Successor = Successors[Cases[i].second];
+    unsigned NewSuccessorIndex = SuccessorsMap[Successor].Index;
+    NewCases.push_back(std::make_pair(Cases[i].first, NewSuccessorIndex));
+  }
+
+  // Convert SuccessorsMap into new Successors array.
+  SmallVector<BasicBlock*, 32> NewSuccessors(SuccessorsMap.size(), 0);
+  for (SuccessorsDenseMapIt i = SuccessorsMap.begin(), e = SuccessorsMap.end();
+       i != e; ++i)
+    NewSuccessors[i->second.Index] = i->first;
+
+  // Create new 'switchr' instruction.
+  BasicBlock* CurBlock = ToBeRemoved->getParent();
+
+  SwitchRInst::Create(Condition, NewSuccessors, NewCases, CurBlock);
+  CurBlock->getInstList().erase(ToBeRemoved);
 
   ++NumSwitchRInserted;
 }

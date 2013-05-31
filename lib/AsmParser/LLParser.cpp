@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "LLParser.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/AutoUpgrade.h"
 #include "llvm/IR/CallingConv.h"
@@ -3595,12 +3596,16 @@ bool LLParser::ParseSwitchR(Instruction *&Inst, PerFunctionState &PFS) {
 
   std::sort(ParsedCases.begin(), ParsedCases.end(), SwitchRCaseCmp());
 
-  SmallVector<std::pair<ConstantRange, BasicBlock*>, 32 > Cases;
+  DenseMap<BasicBlock*, unsigned> SuccessorsMap;
+  SmallVector<std::pair<ConstantRange, unsigned>, 32 > Cases;
 
   for (SmallVectorImpl<std::pair<SwitchRCase, LocTy> >::iterator
        i = ParsedCases.begin(), p = i, e = ParsedCases.end(); i != e; p = i++) {
+    DenseMap<BasicBlock*, unsigned>::iterator SuccessorIt =
+      SuccessorsMap.insert(std::make_pair(i->first.BB, SuccessorsMap.size()))
+      .first;
 
-    Cases.push_back(std::make_pair(i->first.CR, i->first.BB));
+    Cases.push_back(std::make_pair(i->first.CR, SuccessorIt->second));
 
     // Skip the wrapped case by now.
     if (i->first.CR.isWrappedSet() || i->first.CR.isEmptySet())
@@ -3628,7 +3633,13 @@ bool LLParser::ParseSwitchR(Instruction *&Inst, PerFunctionState &PFS) {
 
   Lex.Lex();  // Eat the ']'.
 
-  SwitchRInst *SI = SwitchRInst::Create(Cond, Cases);
+  SmallVector<BasicBlock*, 32 > Successors(SuccessorsMap.size(), 0);
+
+  for (DenseMap<BasicBlock*, unsigned>::iterator s = SuccessorsMap.begin(),
+       e = SuccessorsMap.end(); s != e; ++s)
+    Successors[s->second] = s->first;
+
+  SwitchRInst *SI = SwitchRInst::Create(Cond, Successors, Cases);
 
   Inst = SI;
   return false;

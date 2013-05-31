@@ -3304,22 +3304,11 @@ struct SwitchRCaseCmp {
   }
 };
 
-void SwitchRInst::init(Value *Value, CasesArrayRef Cases, bool SortCases) {
-  assert(Value && Cases.size());
+void SwitchRInst::init(Value *Value,
+                       SuccessorsArrayRef Successors, CasesArrayRef Cases) {
+  assert(Value && Cases.size() && "Bad constructor arguments");
 
-  const unsigned BadIndex = -1U;
-
-  DenseMap<BasicBlock*, unsigned> SuccessorIndices;
-  SmallVector<std::pair<ConstantRange, BasicBlock*>, 32 > CasesVector;
-  for (CasesArrayRefIt i = Cases.begin(), e = Cases.end(); i != e; ++i) {
-    SuccessorIndices.insert(std::make_pair(i->second, BadIndex));
-    CasesVector.push_back(*i);
-  }
-
-  if (SortCases)
-    std::sort(CasesVector.begin(), CasesVector.end(), SwitchRCaseCmp());
-
-  ReservedSpace = 1 + SuccessorIndices.size();
+  ReservedSpace = 1 + Cases.size();
   NumOperands = 1;
   OperandList = allocHungoffUses(ReservedSpace);
 
@@ -3329,20 +3318,14 @@ void SwitchRInst::init(Value *Value, CasesArrayRef Cases, bool SortCases) {
   RemovedSuccessors = 0;
   TombstoneSuccessor = 0;
 
-  // TODO: Solve issue with PHI nodes:
-  // Assertion:
-  // PHINode should have one entry for each predecessor of its parent
-  // basic block!
-//  for (SmallVectorImpl<std::pair<ConstantRange, BasicBlock*> >::iterator
-//       i = CasesVector.begin(), e = CasesVector.end(); i != e; ++i) {
-//    if (SuccessorIndices[i->second] == BadIndex)
-//      SuccessorIndices[i->second] = addCase(i->first, i->second);
-//    else
-//      addCase(i->first, SuccessorIndices[i->second]);
-//  }
-  for (SmallVectorImpl<std::pair<ConstantRange, BasicBlock*> >::iterator
-       i = CasesVector.begin(), e = CasesVector.end(); i != e; ++i)
-    addCase(i->first, i->second);
+  for (SuccessorsArrayRefIt i = Successors.begin(), e = Successors.end();
+       i != e; ++i)
+    addSuccessor(*i, 0);
+
+  for (CasesArrayRefIt i = Cases.begin(), e = Cases.end(); i != e; ++i) {
+    ConstantRange CR = i->first;
+    addCase(CR, i->second);
+  }
 }
 
 /// SwitchRInst ctor - Create a new switchr instruction, specifying a value to
@@ -3350,12 +3333,12 @@ void SwitchRInst::init(Value *Value, CasesArrayRef Cases, bool SortCases) {
 /// "Cases" should contain
 /// non-empty non-overlapped ascending ordered set of range+successor pairs.
 /// This constructor can also autoinsert before another instruction.
-SwitchRInst::SwitchRInst(Value *Value, CasesArrayRef Cases,
-                         Instruction *InsertBefore,
-                         bool SortCases)
+SwitchRInst::SwitchRInst(Value *Value,
+                         SuccessorsArrayRef Successors, CasesArrayRef Cases,
+                         Instruction *InsertBefore)
   : TerminatorInst(Type::getVoidTy(Value->getContext()), Instruction::SwitchR,
                    0, 0, InsertBefore) {
-  init(Value, Cases, SortCases);
+  init(Value, Successors, Cases);
 }
 
 /// SwitchRInst ctor - Create a new switchr instruction, specifying a value to
@@ -3363,11 +3346,12 @@ SwitchRInst::SwitchRInst(Value *Value, CasesArrayRef Cases,
 /// "Cases" should contain
 /// non-empty non-overlapped ascending ordered set of range+successor pairs.
 /// This constructor also autoinserts at the end of the specified BasicBlock.
-SwitchRInst::SwitchRInst(Value *Value, CasesArrayRef Cases,
-                         BasicBlock *InsertAtEnd, bool SortCases)
+SwitchRInst::SwitchRInst(Value *Value,
+                         SuccessorsArrayRef Successors, CasesArrayRef Cases,
+                         BasicBlock *InsertAtEnd)
   : TerminatorInst(Type::getVoidTy(Value->getContext()), Instruction::SwitchR,
                    0, 0, InsertAtEnd) {
-  init(Value, Cases, SortCases);
+  init(Value, Successors, Cases);
 }
 
 SwitchRInst::SwitchRInst(const SwitchRInst &SI)
