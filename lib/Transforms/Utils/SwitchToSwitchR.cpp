@@ -17,6 +17,7 @@
 
 #define DEBUG_TYPE "switchtoswitchr"
 
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Statistic.h"
@@ -52,6 +53,7 @@ namespace {
 
   private:
     void processSwitchInst(SwitchInst *SI);
+    bool processSwitchRInst(SwitchRInst *SI);
     void optimizeTerminator(Instruction* ToBeRemoved,
                             Value* Condition,
                             SwitchRInst::SuccessorsArrayRef Successors,
@@ -80,6 +82,9 @@ bool SwitchToSwitchR::runOnFunction(Function &F) {
     if (SwitchInst *SI = dyn_cast<SwitchInst>(Cur->getTerminator())) {
       Changed = true;
       processSwitchInst(SI);
+    } else if (SwitchRInst *SI = dyn_cast<SwitchRInst>(Cur->getTerminator())) {
+      if (processSwitchRInst(SI))
+        Changed = true;
     }
   }
 
@@ -142,6 +147,44 @@ void SwitchToSwitchR::processSwitchInst(SwitchInst *SI) {
   optimizeTerminator(SI, Val, Successors, Cases);
 }
 
+// processSwitchRInst - Removes successor duplicates from 'switchr'
+//
+bool SwitchToSwitchR::processSwitchRInst(SwitchRInst *SI) {
+  BasicBlock *CurBlock = SI->getParent();
+  Value *Val = SI->getCondition();  // The value we are switching on...
+
+  // If there is only the default destination,
+  // don't bother with the code below.
+  if (SI->getNumCases() == 1) {
+    BranchInst::Create(SI->case_begin().getCaseSuccessor(), CurBlock);
+    CurBlock->getInstList().erase(SI);
+    return true;
+  }
+
+  SmallVector<BasicBlock*, 32> Successors(SI->getNumSuccessors(), 0);
+  SmallVector<std::pair<ConstantRange, unsigned>, 32 > Cases;
+
+  SmallSet<BasicBlock*, 32> CountedSuccessors;
+  bool IsOptimized = true;
+
+  for (unsigned i = 0, e = SI->getNumSuccessors(); i != e; ++i) {
+    Successors[i] = SI->getSuccessor(i);
+    if (!CountedSuccessors.insert(SI->getSuccessor(i)))
+      IsOptimized = false;
+  }
+
+  if (IsOptimized)
+    return false;
+
+  for (SwitchRInst::CaseIt
+       i = SI->case_begin(), e = SI->case_end(); i != e; ++i)
+    Cases.push_back(std::make_pair(i.getCaseRange(), i.getSuccessorIndex()));
+
+  optimizeTerminator(SI, Val, Successors, Cases);
+
+  return true;
+}
+
 struct MergeInfo {
   MergeInfo() : Index((unsigned)(-1)), NumMergedIn((unsigned)(-1)) {}
   MergeInfo(unsigned I, unsigned NMergedIn)
@@ -188,8 +231,8 @@ void SwitchToSwitchR::optimizeTerminator(
   // Create new 'switchr' instruction.
   BasicBlock* CurBlock = ToBeRemoved->getParent();
 
+  ToBeRemoved->eraseFromParent();
   SwitchRInst::Create(Condition, NewSuccessors, NewCases, CurBlock);
-  CurBlock->getInstList().erase(ToBeRemoved);
 
   ++NumSwitchRInserted;
 }
