@@ -50,6 +50,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/IRBuilder.h"
@@ -62,8 +63,10 @@
 #include "llvm/Support/CallSite.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/ValueHandle.h"
 #include "llvm/Support/raw_ostream.h"
+#include <ctime>
 #include <vector>
 using namespace llvm;
 
@@ -71,6 +74,71 @@ STATISTIC(NumFunctionsMerged, "Number of functions merged");
 STATISTIC(NumThunksWritten, "Number of thunks generated");
 STATISTIC(NumAliasesWritten, "Number of aliases generated");
 STATISTIC(NumDoubleWeak, "Number of new functions created");
+
+static const char *SwitchStatisticsFileName =
+    "/home/stepan/projects/llvm.project/5-tests/db-ops.csv";
+class OverallStats {
+
+  struct RecordData {
+    unsigned Unique;
+    unsigned Merged;
+  };
+
+  bool AppendMode;
+  std::string StatisticsOSErrInfo;
+  llvm::raw_fd_ostream StatisticsOS;
+  DenseMap<llvm::Module*, RecordData > Records;
+
+  void writeHeader() {
+    StatisticsOS << "Module; Unique; Merged\n";
+  }
+
+  RecordData &getRecordData(Module *M) {
+    DenseMap<SwitchInst*, RecordData >::iterator found = Records.find(SI);
+    if (found == Records.end()) {
+      RecordData &rd = Records[M];
+      rd.Unique = 0;
+      rd.Merged = 0;
+      return rd;
+    }
+
+    return found->second;
+  }
+
+public:
+  OverallStats() :
+    AppendMode(llvm::sys::fs::exists(SwitchStatisticsFileName)),
+    StatisticsOS(SwitchStatisticsFileName,
+                 StatisticsOSErrInfo,
+                 llvm::raw_fd_ostream::F_Append) {
+    if (!AppendMode)
+      writeHeader();
+  }
+
+  ~OverallStats() {
+    time_t t = time(0);
+    for (DenseMap<SwitchInst*, RecordData >::iterator
+         i = Records.begin(), e = Records.end(); i != e; ++i) {
+      StatisticsOS << i->first->getName() << "-" << t << ";"
+                   << i->second.Unique << ";"
+                   << i->second.Merged << "\n";
+    }
+    StatisticsOS.close();
+  }
+
+  void onFunctionMerged(Function *F) {
+    ++getRecordData(F->getParent()).Merged;
+  }
+  void onFunctionUnique(Function *F) {
+    +++getRecordData(F->getParent()).Unique;
+  }
+};
+
+static OverallStats& getOverallStats() {
+  static OverallStats stats;
+  return stats;
+}
+
 
 /// Returns the type id for a type to be hashed. We turn pointer types into
 /// integers here because the actual compare logic below considers pointers and
@@ -816,6 +884,7 @@ void MergeFunctions::mergeTwoFunctions(Function *F, Function *G) {
   }
 
   ++NumFunctionsMerged;
+  getOverallStats().onFunctionMerged(F);
 }
 
 // Insert a ComparableFunction into the FnSet, or merge it away if equal to one
@@ -824,6 +893,7 @@ bool MergeFunctions::insert(ComparableFunction &NewF) {
   std::pair<FnSetType::iterator, bool> Result = FnSet.insert(NewF);
   if (Result.second) {
     DEBUG(dbgs() << "Inserting as unique: " << NewF.getFunc()->getName() << '\n');
+    getOverallStats().onFunctionUnique(NewF.getFunc());
     return false;
   }
 
