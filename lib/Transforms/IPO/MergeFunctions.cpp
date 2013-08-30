@@ -75,11 +75,12 @@ STATISTIC(NumThunksWritten, "Number of thunks generated");
 STATISTIC(NumAliasesWritten, "Number of aliases generated");
 STATISTIC(NumDoubleWeak, "Number of new functions created");
 
-static const char *SwitchStatisticsFileName =
+static const char *OverallStatisticsFileName =
     "/home/stepan/projects/llvm.project/5-tests/db-ops.csv";
 class OverallStats {
 
   struct RecordData {
+    std::string ModuleName;
     unsigned Unique;
     unsigned Merged;
   };
@@ -87,16 +88,18 @@ class OverallStats {
   bool AppendMode;
   std::string StatisticsOSErrInfo;
   llvm::raw_fd_ostream StatisticsOS;
-  DenseMap<llvm::Module*, RecordData > Records;
+  DenseMap<Module*, RecordData > Records;
 
   void writeHeader() {
     StatisticsOS << "Module; Unique; Merged\n";
   }
 
   RecordData &getRecordData(Module *M) {
-    DenseMap<SwitchInst*, RecordData >::iterator found = Records.find(SI);
+    DenseMap<Module*, RecordData >::iterator found = Records.find(M);
     if (found == Records.end()) {
       RecordData &rd = Records[M];
+      if (rd.ModuleName.empty())
+        rd.ModuleName = M->getModuleIdentifier();
       rd.Unique = 0;
       rd.Merged = 0;
       return rd;
@@ -107,19 +110,19 @@ class OverallStats {
 
 public:
   OverallStats() :
-    AppendMode(llvm::sys::fs::exists(SwitchStatisticsFileName)),
-    StatisticsOS(SwitchStatisticsFileName,
+    AppendMode(llvm::sys::fs::exists(OverallStatisticsFileName)),
+    StatisticsOS(OverallStatisticsFileName,
                  StatisticsOSErrInfo,
-                 llvm::raw_fd_ostream::F_Append) {
+                 sys::fs::F_Append) {
     if (!AppendMode)
       writeHeader();
   }
 
   ~OverallStats() {
     time_t t = time(0);
-    for (DenseMap<SwitchInst*, RecordData >::iterator
+    for (DenseMap<Module*, RecordData >::iterator
          i = Records.begin(), e = Records.end(); i != e; ++i) {
-      StatisticsOS << i->first->getName() << "-" << t << ";"
+      StatisticsOS << i->second.ModuleName << "-" << t << ";"
                    << i->second.Unique << ";"
                    << i->second.Merged << "\n";
     }
@@ -130,7 +133,7 @@ public:
     ++getRecordData(F->getParent()).Merged;
   }
   void onFunctionUnique(Function *F) {
-    +++getRecordData(F->getParent()).Unique;
+    ++getRecordData(F->getParent()).Unique;
   }
 };
 
