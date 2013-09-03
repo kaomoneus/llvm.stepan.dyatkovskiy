@@ -208,6 +208,10 @@ const char *MipsTargetLowering::getTargetNodeName(unsigned Opcode) const {
   case MipsISD::SHRL_DSP:          return "MipsISD::SHRL_DSP";
   case MipsISD::SETCC_DSP:         return "MipsISD::SETCC_DSP";
   case MipsISD::SELECT_CC_DSP:     return "MipsISD::SELECT_CC_DSP";
+  case MipsISD::VALL_ZERO:         return "MipsISD::VALL_ZERO";
+  case MipsISD::VANY_ZERO:         return "MipsISD::VANY_ZERO";
+  case MipsISD::VALL_NONZERO:      return "MipsISD::VALL_NONZERO";
+  case MipsISD::VANY_NONZERO:      return "MipsISD::VANY_NONZERO";
   default:                         return NULL;
   }
 }
@@ -2330,7 +2334,7 @@ MipsTargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
                     SpecialCallingConv);
 
   MipsCCInfo.analyzeCallOperands(Outs, IsVarArg,
-                                 getTargetMachine().Options.UseSoftFloat,
+                                 Subtarget->mipsSEUsesSoftFloat(),
                                  Callee.getNode(), CLI.Args);
 
   // Get a count of how many bytes are to be pushed on the stack.
@@ -2516,7 +2520,7 @@ MipsTargetLowering::LowerCallResult(SDValue Chain, SDValue InFlag,
                  getTargetMachine(), RVLocs, *DAG.getContext());
   MipsCC MipsCCInfo(CallConv, IsO32, Subtarget->isFP64bit(), CCInfo);
 
-  MipsCCInfo.analyzeCallResult(Ins, getTargetMachine().Options.UseSoftFloat,
+  MipsCCInfo.analyzeCallResult(Ins, Subtarget->mipsSEUsesSoftFloat(),
                                CallNode, RetTy);
 
   // Copy all of the result registers out of their specified physreg.
@@ -2564,7 +2568,7 @@ MipsTargetLowering::LowerFormalArguments(SDValue Chain,
   MipsCC MipsCCInfo(CallConv, IsO32, Subtarget->isFP64bit(), CCInfo);
   Function::const_arg_iterator FuncArg =
     DAG.getMachineFunction().getFunction()->arg_begin();
-  bool UseSoftFloat = getTargetMachine().Options.UseSoftFloat;
+  bool UseSoftFloat = Subtarget->mipsSEUsesSoftFloat();
 
   MipsCCInfo.analyzeFormalArguments(Ins, UseSoftFloat, FuncArg);
   MipsFI->setFormalArgInfo(CCInfo.getNextStackOffset(),
@@ -2724,7 +2728,7 @@ MipsTargetLowering::LowerReturn(SDValue Chain,
   MipsCC MipsCCInfo(CallConv, IsO32, Subtarget->isFP64bit(), CCInfo);
 
   // Analyze return values.
-  MipsCCInfo.analyzeReturn(Outs, getTargetMachine().Options.UseSoftFloat,
+  MipsCCInfo.analyzeReturn(Outs, Subtarget->mipsSEUsesSoftFloat(),
                            MF.getFunction()->getReturnType());
 
   SDValue Flag;
