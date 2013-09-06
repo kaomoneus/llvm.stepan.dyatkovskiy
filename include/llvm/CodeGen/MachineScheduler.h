@@ -107,6 +107,10 @@ class MachineSchedStrategy {
 public:
   virtual ~MachineSchedStrategy() {}
 
+  /// Check if pressure tracking is needed before building the DAG and
+  /// initializing this strategy.
+  virtual bool shouldTrackPressure(unsigned NumRegionInstrs) { return true; }
+
   /// Initialize the strategy after building the DAG for a new region.
   virtual void initialize(ScheduleDAGMI *DAG) = 0;
 
@@ -227,6 +231,7 @@ protected:
   PressureDiffs SUPressureDiffs;
 
   /// Register pressure in this region computed by initRegPressure.
+  bool ShouldTrackPressure;
   IntervalPressure RegPressure;
   RegPressureTracker RPTracker;
 
@@ -259,8 +264,9 @@ public:
   ScheduleDAGMI(MachineSchedContext *C, MachineSchedStrategy *S):
     ScheduleDAGInstrs(*C->MF, *C->MLI, *C->MDT, /*IsPostRA=*/false, C->LIS),
     AA(C->AA), RegClassInfo(C->RegClassInfo), SchedImpl(S), DFSResult(0),
-    Topo(SUnits, &ExitSU), RPTracker(RegPressure), CurrentTop(),
-    TopRPTracker(TopPressure), CurrentBottom(), BotRPTracker(BotPressure),
+    Topo(SUnits, &ExitSU), ShouldTrackPressure(false),
+    RPTracker(RegPressure), CurrentTop(), TopRPTracker(TopPressure),
+    CurrentBottom(), BotRPTracker(BotPressure),
     NextClusterPred(NULL), NextClusterSucc(NULL) {
 #ifndef NDEBUG
     NumInstrsScheduled = 0;
@@ -268,6 +274,9 @@ public:
   }
 
   virtual ~ScheduleDAGMI();
+
+  /// \brief Return true if register pressure tracking is enabled.
+  bool isTrackingPressure() const { return ShouldTrackPressure; }
 
   /// Add a postprocessing step to the DAG builder.
   /// Mutations are applied in the order that they are added after normal DAG
