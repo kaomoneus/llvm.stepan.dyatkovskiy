@@ -497,7 +497,7 @@ bool DICompositeType::Verify() const {
   // Make sure DerivedFrom @ field 9 and ContainingType @ field 12 are MDNodes.
   if (!fieldIsMDNode(DbgNode, 9))
     return false;
-  if (!fieldIsMDNode(DbgNode, 12))
+  if (!fieldIsTypeRef(DbgNode, 12))
     return false;
 
   // Make sure the type identifier at field 14 is MDString, it can be null.
@@ -524,7 +524,7 @@ bool DISubprogram::Verify() const {
   if (!fieldIsMDNode(DbgNode, 7))
     return false;
   // Containing type @ field 12.
-  if (!fieldIsMDNode(DbgNode, 12))
+  if (!fieldIsTypeRef(DbgNode, 12))
     return false;
   return DbgNode->getNumOperands() == 20;
 }
@@ -707,10 +707,21 @@ void DICompositeType::addMember(DIDescriptor D) {
   setTypeArray(DIArray(MDNode::get(DbgNode->getContext(), M)));
 }
 
+/// Generate a reference to this DIType. Uses the type identifier instead
+/// of the actual MDNode if possible, to help type uniquing.
+DITypeRef DIType::generateRef() {
+  if (!isCompositeType())
+    return DITypeRef(*this);
+  DICompositeType DTy(DbgNode);
+  if (!DTy.getIdentifier())
+    return DITypeRef(*this);
+  return DITypeRef(DTy.getIdentifier());
+}
+
 /// \brief Set the containing type.
 void DICompositeType::setContainingType(DICompositeType ContainingType) {
   TrackingVH<MDNode> N(*this);
-  N->replaceOperandWith(12, ContainingType);
+  N->replaceOperandWith(12, ContainingType.generateRef());
   DbgNode = N;
 }
 

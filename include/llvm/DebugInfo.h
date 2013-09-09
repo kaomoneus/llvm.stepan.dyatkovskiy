@@ -155,20 +155,6 @@ namespace llvm {
   template <>
   DITypeRef DIDescriptor::getFieldAs<DITypeRef>(unsigned Elt) const;
 
-  /// Represents reference to a DIType, abstracts over direct and
-  /// identifier-based metadata type references.
-  class DITypeRef {
-    template <typename DescTy>
-    friend DescTy DIDescriptor::getFieldAs(unsigned Elt) const;
-
-    /// TypeVal can be either a MDNode or a MDString, in the latter,
-    /// MDString specifies the type identifier.
-    const Value *TypeVal;
-    explicit DITypeRef(const Value *V);
-  public:
-    DIType resolve(const DITypeIdentifierMap &Map) const;
-  };
-
   /// DISubrange - This is used to represent ranges, for array bounds.
   class DISubrange : public DIDescriptor {
     friend class DIDescriptor;
@@ -285,10 +271,30 @@ namespace llvm {
     /// isUnsignedDIType - Return true if type encoding is unsigned.
     bool isUnsignedDIType();
 
+    /// Generate a reference to this DIType. Uses the type identifier instead
+    /// of the actual MDNode if possible, to help type uniquing.
+    DITypeRef generateRef();
+
     /// replaceAllUsesWith - Replace all uses of debug info referenced by
     /// this descriptor.
     void replaceAllUsesWith(DIDescriptor &D);
     void replaceAllUsesWith(MDNode *D);
+  };
+
+  /// Represents reference to a DIType, abstracts over direct and
+  /// identifier-based metadata type references.
+  class DITypeRef {
+    template <typename DescTy>
+    friend DescTy DIDescriptor::getFieldAs(unsigned Elt) const;
+    friend DITypeRef DIType::generateRef();
+
+    /// TypeVal can be either a MDNode or a MDString, in the latter,
+    /// MDString specifies the type identifier.
+    const Value *TypeVal;
+    explicit DITypeRef(const Value *V);
+  public:
+    DIType resolve(const DITypeIdentifierMap &Map) const;
+    operator Value *() const { return const_cast<Value*>(TypeVal); }
   };
 
   /// DIBasicType - A basic type, like 'int' or 'float'.
@@ -352,8 +358,8 @@ namespace llvm {
     void setTypeArray(DIArray Elements, DIArray TParams = DIArray());
     void addMember(DIDescriptor D);
     unsigned getRunTimeLang() const { return getUnsignedField(11); }
-    DICompositeType getContainingType() const {
-      return getFieldAs<DICompositeType>(12);
+    DITypeRef getContainingType() const {
+      return getFieldAs<DITypeRef>(12);
     }
     void setContainingType(DICompositeType ContainingType);
     DIArray getTemplateParams() const { return getFieldAs<DIArray>(13); }
@@ -420,8 +426,8 @@ namespace llvm {
     unsigned getVirtuality() const { return getUnsignedField(10); }
     unsigned getVirtualIndex() const { return getUnsignedField(11); }
 
-    DICompositeType getContainingType() const {
-      return getFieldAs<DICompositeType>(12);
+    DITypeRef getContainingType() const {
+      return getFieldAs<DITypeRef>(12);
     }
 
     unsigned getFlags() const {
