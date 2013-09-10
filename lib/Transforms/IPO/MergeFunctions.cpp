@@ -51,6 +51,7 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/IRBuilder.h"
@@ -267,7 +268,14 @@ private:
   /// Compare two Types, treating all pointer types as equal.
   bool isEquivalentType(Type *Ty1, Type *Ty2) const;
 
-  void getFuncUID(std::vector<unsigned> UID, Function* F);
+  typedef uint64_t UIDPartType;
+  typedef std::vector<UIDPartType> UIDPartsType;
+
+  void getFuncUID(UIDPartsType &UID, Function* F);
+  void getAttributesUID(UIDPartsType &UID, Function* F);
+  void getArgsUID(UIDPartsType &UID, Function* F) {}
+  void getFunctionBodyUID(UIDPartsType &UID, Function* F) {}
+  void getStringUID(UIDPartsType &UID, StringRef V);
 
   // The two functions undergoing comparison.
   const Function *F1, *F2;
@@ -456,15 +464,50 @@ bool FunctionComparator::isEquivalentGEP(const GEPOperator *GEP1,
 /// method.
 /// This method encodes function into set of unsigned numbers,
 /// similar to bitcode writer, but simplier.
-void FunctionComparator::getFuncUID(std::vector<unsigned> UID, Function *F) {
+void FunctionComparator::getFuncUID(UIDPartsType &UID, Function *F) {
   getAttributesUID(UID, F);
-  getGCUID(UID, F);
-  getSectionUID(UID, F);
+  UID.push_back(F->hasGC() ? (UIDPartType)F->getGC() : 0);
+  UID.push_back(F->hasSection());
+  if (!F->getSection().empty())
+    getStringUID(UID, F->getSection());
   UID.push_back(F->isVarArg());
-  getCallingConvUID(UID, F);
-  getFunctionTypeUID(UID, F);
+  UID.push_back(F->getCallingConv());
+  UID.push_back((UIDPartType)F->getFunctionType());
+
   getArgsUID(UID, F);
   getFunctionBodyUID(UID, F);
+}
+
+void FunctionComparator::getAttributesUID(UIDPartsType &UID, Function* F) {
+  AttributeSet AS = F->getAttributes();
+  // Mostly cloned from BitcodeWriter, but simplified a bit.
+  for (unsigned i = 0, e = AS.getNumSlots(); i != e; ++i) {
+    UID.push_back(AS.getSlotIndex(i));
+    for (AttributeSet::iterator I = AS.begin(i), E = AS.end(i);
+     I != E; ++I) {
+      Attribute Attr = *I;
+      if (Attr.isEnumAttribute()) {
+        UID.push_back(0);
+        UID.push_back(Attr.getKindAsEnum());
+      } else if (Attr.isAlignAttribute()) {
+        UID.push_back(1);
+        UID.push_back(Attr.getKindAsEnum());
+        UID.push_back(Attr.getValueAsInt());
+      } else {
+        StringRef Kind = Attr.getKindAsString();
+        UID.push_back(Kind.size());
+        getStringUID(UID, Kind);
+        StringRef Val = Attr.getValueAsString();
+        UID.push_back(Val.size());
+        if (!Val.empty())
+          getStringUID(UID, Val);
+      }
+    }
+  }
+}
+
+void FunctionComparator::getStringUID(UIDPartsType &UID, StringRef V) {
+  UID.insert(UID.end(), V.begin(), V.end());
 }
 
 // Compare two values used by the two functions under pair-wise comparison. If
