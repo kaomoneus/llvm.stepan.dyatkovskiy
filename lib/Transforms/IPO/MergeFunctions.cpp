@@ -267,6 +267,8 @@ private:
   /// Compare two Types, treating all pointer types as equal.
   bool isEquivalentType(Type *Ty1, Type *Ty2) const;
 
+  void getFuncUID(std::vector<unsigned> UID, Function* F);
+
   // The two functions undergoing comparison.
   const Function *F1, *F2;
 
@@ -446,6 +448,23 @@ bool FunctionComparator::isEquivalentGEP(const GEPOperator *GEP1,
   }
 
   return true;
+}
+
+/// getFuncUID - compute unversal function identificator. The main
+/// idea is that this ID should be the same for equal functions.
+/// The order of computations is based on FunctionComparator::compare
+/// method.
+/// This method encodes function into set of unsigned numbers,
+/// similar to bitcode writer, but simplier.
+void FunctionComparator::getFuncUID(std::vector<unsigned> UID, Function *F) {
+  getAttributesUID(UID, F);
+  getGCUID(UID, F);
+  getSectionUID(UID, F);
+  UID.push_back(F->isVarArg());
+  getCallingConvUID(UID, F);
+  getFunctionTypeUID(UID, F);
+  getArgsUID(UID, F);
+  getFunctionBodyUID(UID, F);
 }
 
 // Compare two values used by the two functions under pair-wise comparison. If
