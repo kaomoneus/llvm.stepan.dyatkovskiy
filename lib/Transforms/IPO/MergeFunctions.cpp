@@ -275,7 +275,7 @@ private:
   void getAttributesUID(UIDPartsType &UID, const Function *F);
   void getArgsUID(UIDPartsType &UID, const Function *F) {}
   void getFunctionBodyUID(UIDPartsType &UID, const Function *F) {}
-  void getTypeUID(UIDPartsType &UID, const Type *F) {}
+  void getTypeUID(UIDPartsType &UID, const Type *Ty);
   void getValueUID(UIDPartsType &UID, const Value *V) {}
   void getBBUID(UIDPartsType &UID, const BasicBlock *BB) {}
   void getStringUID(UIDPartsType &UID, const StringRef V);
@@ -540,7 +540,66 @@ void FunctionComparator::getAttributesUID(UIDPartsType &UID,
 }
 
 void FunctionComparator::getTypeUID(UIDPartsType &UID, const Type *Ty) {
+  // If type is complex - invoke getType recursive.
+  // If type is simple:
+  // get unified type for Ty, and put its UID.
+  switch (Ty->getTypeID()) {
+  default:
+    llvm_unreachable("Unknown type!");
+    // Fall through in Release mode.
+  case Type::IntegerTyID:
+  case Type::VectorTyID:
+    // Ty1 == Ty2 would have returned true earlier.
+    UID.push_back((UIDPartType)Ty);
+    break;
 
+  case Type::VoidTyID:
+  case Type::FloatTyID:
+  case Type::DoubleTyID:
+  case Type::X86_FP80TyID:
+  case Type::FP128TyID:
+  case Type::PPC_FP128TyID:
+  case Type::LabelTyID:
+  case Type::MetadataTyID:
+    UID.push_back(Type::VoidTyID);
+    break;
+
+  case Type::PointerTyID: {
+    UID.push_back(Ty->getPointerAddressSpace());
+    LLVMContext &Ctx = Ty->getContext();
+    UID.push_back((UIDPartType)(TD->getIntPtrType(Ctx)));
+    break;
+  }
+
+  case Type::StructTyID: {
+    const StructType *STy = cast<StructType>(Ty);
+    UID.push_back(STy->getNumElements());
+    UID.push_back(STy->isPacked());
+
+    for (unsigned i = 0, e = STy->getNumElements(); i != e; ++i)
+      getTypeUID(UID, STy->getElementType(i));
+    break;
+  }
+
+  case Type::FunctionTyID: {
+    const FunctionType *FTy = cast<FunctionType>(Ty);
+    UID.push_back(FTy->getNumParams());
+    UID.push_back(FTy->isVarArg());
+    getTypeUID(UID, FTy->getReturnType());
+
+    for (unsigned i = 0, e = FTy->getNumParams(); i != e; ++i)
+      getTypeUID(UID, FTy->getParamType(i));
+
+    break;
+  }
+
+  case Type::ArrayTyID: {
+    const ArrayType *ATy = cast<ArrayType>(Ty);
+    UID.push_back(ATy->getNumElements());
+    getTypeUID(UID, ATy->getElementType());
+    break;
+  }
+  }
 }
 
 void FunctionComparator::getStringUID(UIDPartsType &UID, StringRef V) {
