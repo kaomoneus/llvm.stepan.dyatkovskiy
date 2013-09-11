@@ -273,8 +273,6 @@ private:
 
   void getFuncUID(UIDPartsType &UID, const Function *F);
   void getAttributesUID(UIDPartsType &UID, const Function *F);
-  void getArgsUID(UIDPartsType &UID, const Function *F) {}
-  void getFunctionBodyUID(UIDPartsType &UID, const Function *F) {}
   void getTypeUID(UIDPartsType &UID, const Type *Ty);
   void getValueUID(UIDPartsType &UID, const Value *V) {}
   void getBBUID(UIDPartsType &UID, const BasicBlock *BB) {}
