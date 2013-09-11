@@ -769,9 +769,9 @@ enum AcceleratorTable {
   // Data layout descriptors.
   DW_ATOM_null = 0u,       // Marker as the end of a list of atoms.
   DW_ATOM_die_offset = 1u, // DIE offset in the debug_info section.
-  DW_ATOM_cu_offset = 2u,  // Offset of the compile unit header that contains the
+  DW_ATOM_cu_offset = 2u, // Offset of the compile unit header that contains the
                           // item in question.
-  DW_ATOM_die_tag = 3u,    // A tag entry.
+  DW_ATOM_die_tag = 3u,   // A tag entry.
   DW_ATOM_type_flags = 4u, // Set of flags for a type.
 
   // DW_ATOM_type_flags values.
@@ -788,6 +788,23 @@ enum AcceleratorTable {
 
 /// AtomTypeString - Return the string for the specified Atom type.
 const char *AtomTypeString(unsigned Atom);
+
+// Constants for the GNU pubnames/pubtypes extensions supporting gdb index.
+enum GDBIndex {
+  // Special value to indicate no attributes are present.
+  GDB_INDEX_SYMBOL_KIND_NONE = 0,
+  GDB_INDEX_SYMBOL_KIND_TYPE = 1,
+  GDB_INDEX_SYMBOL_KIND_VARIABLE = 2,
+  GDB_INDEX_SYMBOL_KIND_FUNCTION = 3,
+  GDB_INDEX_SYMBOL_KIND_OTHER = 4,
+  // 3 unused bits.
+  GDB_INDEX_SYMBOL_KIND_UNUSED5 = 5,
+  GDB_INDEX_SYMBOL_KIND_UNUSED6 = 6,
+  GDB_INDEX_SYMBOL_KIND_UNUSED7 = 7
+};
+
+/// GDBIndexTypeString - Return the string for the specified index type.
+const char *GDBIndexTypeString(unsigned Kind);
 
 } // End of namespace dwarf
 

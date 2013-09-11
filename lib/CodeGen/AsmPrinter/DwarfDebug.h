@@ -469,6 +469,9 @@ private:
   /// \brief Construct new DW_TAG_lexical_block for this scope and
   /// attach DW_AT_low_pc/DW_AT_high_pc labels.
   DIE *constructLexicalScopeDIE(CompileUnit *TheCU, LexicalScope *Scope);
+  /// A helper function to check whether the DIE for a given Scope is going
+  /// to be null.
+  bool isLexicalScopeDIENull(LexicalScope *Scope);
 
   /// \brief This scope represents inlined body of a function. Construct
   /// DIE to represent this concrete inlined copy of the function.
@@ -476,6 +479,9 @@ private:
 
   /// \brief Construct a DIE for this scope.
   DIE *constructScopeDIE(CompileUnit *TheCU, LexicalScope *Scope);
+  /// A helper function to create children of a Scope DIE.
+  DIE *createScopeChildrenDIE(CompileUnit *TheCU, LexicalScope *Scope,
+                              SmallVectorImpl<DIE*> &Children);
 
   /// \brief Emit initial Dwarf sections with a label at the start of each one.
   void emitSectionLabels();
@@ -527,7 +533,7 @@ private:
   void emitAccelTypes();
 
   /// \brief Emit visible names into a debug pubnames section.
-  void emitDebugPubnames();
+  void emitDebugPubNames();
 
   /// \brief Emit visible types into a debug pubtypes section.
   void emitDebugPubTypes();
@@ -683,8 +689,15 @@ public:
   /// Returns the Dwarf Version.
   unsigned getDwarfVersion() const { return DwarfVersion; }
 
-  /// Find the MDNode for the given type reference.
-  MDNode *resolve(DITypeRef TRef) const;
+  /// Find the MDNode for the given scope reference.
+  template <typename T>
+  T resolve(DIRef<T> Ref) const {
+    return Ref.resolve(TypeIdentifierMap);
+  }
+
+  /// isSubprogramContext - Return true if Context is either a subprogram
+  /// or another context nested inside a subprogram.
+  bool isSubprogramContext(const MDNode *Context);
 
 };
 } // End of namespace llvm

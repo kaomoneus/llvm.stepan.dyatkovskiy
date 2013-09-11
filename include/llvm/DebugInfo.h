@@ -17,6 +17,7 @@
 #ifndef LLVM_DEBUGINFO_H
 #define LLVM_DEBUGINFO_H
 
+#include "llvm/Support/Casting.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -46,7 +47,7 @@ namespace llvm {
   class DILexicalBlockFile;
   class DIVariable;
   class DIType;
-  class DITypeRef;
+  class DIScope;
   class DIObjCProperty;
 
   /// Maps from type identifier to the actual MDNode.
@@ -56,9 +57,10 @@ namespace llvm {
   /// This should not be stored in a container, because the underlying MDNode
   /// may change in certain situations.
   class DIDescriptor {
-    // Befriends DITypeRef so DITypeRef can befriend the protected member
-    // function: getFieldAs<DITypeRef>.
-    friend class DITypeRef;
+    // Befriends DIRef so DIRef can befriend the protected member
+    // function: getFieldAs<DIRef>.
+    template <typename T>
+    friend class DIRef;
   public:
     enum {
       FlagPrivate            = 1 << 0,
@@ -151,10 +153,6 @@ namespace llvm {
     void dump() const;
   };
 
-  /// Specialize getFieldAs to handle fields that are references to DITypes.
-  template <>
-  DITypeRef DIDescriptor::getFieldAs<DITypeRef>(unsigned Elt) const;
-
   /// DISubrange - This is used to represent ranges, for array bounds.
   class DISubrange : public DIDescriptor {
     friend class DIDescriptor;
@@ -192,6 +190,10 @@ namespace llvm {
     bool Verify() const;
   };
 
+  template <typename T>
+  class DIRef;
+  typedef DIRef<DIScope> DIScopeRef;
+
   /// DIScope - A base class for various scopes.
   class DIScope : public DIDescriptor {
   protected:
@@ -202,9 +204,13 @@ namespace llvm {
 
     /// Gets the parent scope for this scope node or returns a
     /// default constructed scope.
-    DIScope getContext() const;
+    DIScopeRef getContext() const;
     StringRef getFilename() const;
     StringRef getDirectory() const;
+
+    /// Generate a reference to this DIScope. Uses the type identifier instead
+    /// of the actual MDNode if possible, to help type uniquing.
+    DIScopeRef generateRef();
   };
 
   /// DIType - This is a wrapper for a type.
@@ -221,7 +227,7 @@ namespace llvm {
     /// Verify - Verify that a type descriptor is well formed.
     bool Verify() const;
 
-    DIScope getContext() const          { return getFieldAs<DIScope>(2); }
+    DIScopeRef getContext() const;
     StringRef getName() const           { return getStringField(3);     }
     unsigned getLineNumber() const      { return getUnsignedField(4); }
     uint64_t getSizeInBits() const      { return getUInt64Field(5); }
@@ -271,31 +277,58 @@ namespace llvm {
     /// isUnsignedDIType - Return true if type encoding is unsigned.
     bool isUnsignedDIType();
 
-    /// Generate a reference to this DIType. Uses the type identifier instead
-    /// of the actual MDNode if possible, to help type uniquing.
-    DITypeRef generateRef();
-
     /// replaceAllUsesWith - Replace all uses of debug info referenced by
     /// this descriptor.
     void replaceAllUsesWith(DIDescriptor &D);
     void replaceAllUsesWith(MDNode *D);
   };
 
-  /// Represents reference to a DIType, abstracts over direct and
-  /// identifier-based metadata type references.
-  class DITypeRef {
+  /// Represents reference to a DIDescriptor, abstracts over direct and
+  /// identifier-based metadata references.
+  template <typename T>
+  class DIRef {
     template <typename DescTy>
     friend DescTy DIDescriptor::getFieldAs(unsigned Elt) const;
-    friend DITypeRef DIType::generateRef();
+    friend DIScopeRef DIScope::getContext() const;
+    friend DIScopeRef DIScope::generateRef();
 
-    /// TypeVal can be either a MDNode or a MDString, in the latter,
+    /// Val can be either a MDNode or a MDString, in the latter,
     /// MDString specifies the type identifier.
-    const Value *TypeVal;
-    explicit DITypeRef(const Value *V);
+    const Value *Val;
+    explicit DIRef(const Value *V);
   public:
-    DIType resolve(const DITypeIdentifierMap &Map) const;
-    operator Value *() const { return const_cast<Value*>(TypeVal); }
+    T resolve(const DITypeIdentifierMap &Map) const {
+      if (!Val)
+        return T();
+
+      if (const MDNode *MD = dyn_cast<MDNode>(Val))
+        return T(MD);
+
+      const MDString *MS = cast<MDString>(Val);
+      // Find the corresponding MDNode.
+      DITypeIdentifierMap::const_iterator Iter = Map.find(MS);
+      assert(Iter != Map.end() && "Identifier not in the type map?");
+      assert(DIType(Iter->second).isType() &&
+             "MDNode in DITypeIdentifierMap should be a DIType.");
+      return T(Iter->second);
+    }
+    operator Value *() const { return const_cast<Value*>(Val); }
   };
+
+  /// Specialize getFieldAs to handle fields that are references to DIScopes.
+  template <>
+  DIScopeRef DIDescriptor::getFieldAs<DIScopeRef>(unsigned Elt) const;
+  /// Specialize DIRef constructor for DIScopeRef.
+  template <>
+  DIRef<DIScope>::DIRef(const Value *V);
+
+  typedef DIRef<DIType> DITypeRef;
+  /// Specialize getFieldAs to handle fields that are references to DITypes.
+  template <>
+  DITypeRef DIDescriptor::getFieldAs<DITypeRef>(unsigned Elt) const;
+  /// Specialize DIRef constructor for DITypeRef.
+  template <>
+  DIRef<DIType>::DIRef(const Value *V);
 
   /// DIBasicType - A basic type, like 'int' or 'float'.
   class DIBasicType : public DIType {
@@ -730,10 +763,6 @@ namespace llvm {
   /// getDICompositeType - Find underlying composite type.
   DICompositeType getDICompositeType(DIType T);
 
-  /// isSubprogramContext - Return true if Context is either a subprogram
-  /// or another context nested inside a subprogram.
-  bool isSubprogramContext(const MDNode *Context);
-
   /// getOrInsertFnSpecificMDNode - Return a NameMDNode that is suitable
   /// to hold function specific information.
   NamedMDNode *getOrInsertFnSpecificMDNode(Module &M, DISubprogram SP);
@@ -828,6 +857,7 @@ namespace llvm {
     SmallVector<MDNode *, 8> TYs;  // Types
     SmallVector<MDNode *, 8> Scopes; // Scopes
     SmallPtrSet<MDNode *, 64> NodesSeen;
+    DITypeIdentifierMap TypeIdentifierMap;
   };
 } // end namespace llvm
 
