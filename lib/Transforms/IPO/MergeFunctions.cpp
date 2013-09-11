@@ -271,11 +271,14 @@ private:
   typedef uint64_t UIDPartType;
   typedef std::vector<UIDPartType> UIDPartsType;
 
-  void getFuncUID(UIDPartsType &UID, Function* F);
-  void getAttributesUID(UIDPartsType &UID, Function* F);
-  void getArgsUID(UIDPartsType &UID, Function* F) {}
-  void getFunctionBodyUID(UIDPartsType &UID, Function* F) {}
-  void getStringUID(UIDPartsType &UID, StringRef V);
+  void getFuncUID(UIDPartsType &UID, const Function *F);
+  void getAttributesUID(UIDPartsType &UID, const Function *F);
+  void getArgsUID(UIDPartsType &UID, const Function *F) {}
+  void getFunctionBodyUID(UIDPartsType &UID, const Function *F) {}
+  void getTypeUID(UIDPartsType &UID, const Type *F) {}
+  void getValueUID(UIDPartsType &UID, const Value *V) {}
+  void getBBUID(UIDPartsType &UID, const BasicBlock *BB) {}
+  void getStringUID(UIDPartsType &UID, const StringRef V);
 
   // The two functions undergoing comparison.
   const Function *F1, *F2;
@@ -464,7 +467,7 @@ bool FunctionComparator::isEquivalentGEP(const GEPOperator *GEP1,
 /// method.
 /// This method encodes function into set of unsigned numbers,
 /// similar to bitcode writer, but simplier.
-void FunctionComparator::getFuncUID(UIDPartsType &UID, Function *F) {
+void FunctionComparator::getFuncUID(UIDPartsType &UID, const Function *F) {
   getAttributesUID(UID, F);
   UID.push_back(F->hasGC() ? (UIDPartType)F->getGC() : 0);
   UID.push_back(F->hasSection());
@@ -472,13 +475,43 @@ void FunctionComparator::getFuncUID(UIDPartsType &UID, Function *F) {
     getStringUID(UID, F->getSection());
   UID.push_back(F->isVarArg());
   UID.push_back(F->getCallingConv());
-  UID.push_back((UIDPartType)F->getFunctionType());
+  getTypeUID(UID, F->getFunctionType());
 
-  getArgsUID(UID, F);
-  getFunctionBodyUID(UID, F);
+  // Visit the arguments so that they get enumerated in the order they're
+  // passed in.
+  for (Function::const_arg_iterator fi = F->arg_begin(),
+       fe = F->arg_end(); fi != fe; ++fi) {
+    getValueUID(UID, (const Value*)fi);
+  }
+
+  // We do a CFG-ordered walk since the actual ordering of the blocks in the
+  // linked list is immaterial. Our walk starts at the entry block, then takes
+  // each block from each terminator in order. As an artifact, this also means
+  // that unreachable blocks are ignored.
+  SmallVector<const BasicBlock *, 8> BBs;
+  SmallSet<const BasicBlock *, 128> VisitedBBs; // in terms of F1.
+
+  BBs.push_back(&F->getEntryBlock());
+
+  VisitedBBs.insert(BBs[0]);
+  while (!BBs.empty()) {
+    const BasicBlock *BB = BBs.pop_back_val();
+
+    getBBUID(UID, BB);
+
+    const TerminatorInst *TI = BB->getTerminator();
+
+    for (unsigned i = 0, e = TI->getNumSuccessors(); i != e; ++i) {
+      if (!VisitedBBs.insert(TI->getSuccessor(i)))
+        continue;
+
+      BBs.push_back(TI->getSuccessor(i));
+    }
+  }
 }
 
-void FunctionComparator::getAttributesUID(UIDPartsType &UID, Function* F) {
+void FunctionComparator::getAttributesUID(UIDPartsType &UID,
+                                          const Function* F) {
   AttributeSet AS = F->getAttributes();
   // Mostly cloned from BitcodeWriter, but simplified a bit.
   for (unsigned i = 0, e = AS.getNumSlots(); i != e; ++i) {
@@ -504,6 +537,10 @@ void FunctionComparator::getAttributesUID(UIDPartsType &UID, Function* F) {
       }
     }
   }
+}
+
+void FunctionComparator::getTypeUID(UIDPartsType &UID, const Type *Ty) {
+
 }
 
 void FunctionComparator::getStringUID(UIDPartsType &UID, StringRef V) {
