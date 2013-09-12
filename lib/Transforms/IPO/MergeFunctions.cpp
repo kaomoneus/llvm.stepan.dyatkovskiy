@@ -230,6 +230,39 @@ namespace llvm {
 
 namespace {
 
+class UIDGenerator {
+  typedef uint64_t UIDPartType;
+  typedef std::vector<UIDPartType> UIDPartsType;
+
+public:
+  void getFuncUID(UIDPartsType &UID, const Function *F);
+
+private:
+  void getAttributesUID(UIDPartsType &UID, const Function *F);
+  void getTypeUID(UIDPartsType &UID, const Type *Ty);
+  void getValueUID(UIDPartsType &UID, const Function *F, const Value *V);
+  void getConstantUID(UIDPartsType &UID, const Constant *C,
+                      bool WithType = true);
+  void getAPIntUID(UIDPartsType &UID, const APInt &V);
+  void getAPFloatUID(UIDPartsType &UID, const APFloat &V);
+  void getBBUID(UIDPartsType &UID, const BasicBlock *BB);
+  void getGEPUID(UIDPartsType &UID, const GEPOperator *GEP);
+  void getOpCodeUID(UIDPartsType &UID, const Instruction* I);
+  void getStringUID(UIDPartsType &UID, const StringRef V);
+
+  UIDPartType getShortUID(const Value *V) {
+    std::pair<DenseMap<const Value, UIDPartType>, bool> res =
+        ValueToShortUID.insert(std::make_pair(V, NextShortUID));
+    if (res.second)
+      return NextShortUID++;
+    else
+      return res.first.second;
+  }
+
+  UIDPartType NextShortUID;
+  DenseMap<const Value, UIDPartType> ValueToShortUID;
+};
+
 /// FunctionComparator - Compares two functions to determine whether or not
 /// they will generate machine code with the same behaviour. DataLayout is
 /// used if available. The comparator always fails conservatively (erring on the
@@ -267,16 +300,6 @@ private:
 
   /// Compare two Types, treating all pointer types as equal.
   bool isEquivalentType(Type *Ty1, Type *Ty2) const;
-
-  typedef uint64_t UIDPartType;
-  typedef std::vector<UIDPartType> UIDPartsType;
-
-  void getFuncUID(UIDPartsType &UID, const Function *F);
-  void getAttributesUID(UIDPartsType &UID, const Function *F);
-  void getTypeUID(UIDPartsType &UID, const Type *Ty);
-  void getValueUID(UIDPartsType &UID, const Value *V) {}
-  void getBBUID(UIDPartsType &UID, const BasicBlock *BB) {}
-  void getStringUID(UIDPartsType &UID, const StringRef V);
 
   // The two functions undergoing comparison.
   const Function *F1, *F2;
@@ -465,7 +488,7 @@ bool FunctionComparator::isEquivalentGEP(const GEPOperator *GEP1,
 /// method.
 /// This method encodes function into set of unsigned numbers,
 /// similar to bitcode writer, but simplier.
-void FunctionComparator::getFuncUID(UIDPartsType &UID, const Function *F) {
+void UIDGenerator::getFuncUID(UIDPartsType &UID, const Function *F) {
   getAttributesUID(UID, F);
   UID.push_back(F->hasGC() ? (UIDPartType)F->getGC() : 0);
   UID.push_back(F->hasSection());
@@ -479,7 +502,7 @@ void FunctionComparator::getFuncUID(UIDPartsType &UID, const Function *F) {
   // passed in.
   for (Function::const_arg_iterator fi = F->arg_begin(),
        fe = F->arg_end(); fi != fe; ++fi) {
-    getValueUID(UID, (const Value*)fi);
+    getValueUID(UID, F, (const Value*)fi);
   }
 
   // We do a CFG-ordered walk since the actual ordering of the blocks in the
@@ -508,7 +531,7 @@ void FunctionComparator::getFuncUID(UIDPartsType &UID, const Function *F) {
   }
 }
 
-void FunctionComparator::getAttributesUID(UIDPartsType &UID,
+void UIDGenerator::getAttributesUID(UIDPartsType &UID,
                                           const Function* F) {
   AttributeSet AS = F->getAttributes();
   // Mostly cloned from BitcodeWriter, but simplified a bit.
@@ -537,7 +560,10 @@ void FunctionComparator::getAttributesUID(UIDPartsType &UID,
   }
 }
 
-void FunctionComparator::getTypeUID(UIDPartsType &UID, const Type *Ty) {
+void UIDGenerator::getTypeUID(UIDPartsType &UID, const Type *Ty) {
+
+  // TODO: Lossless bitcasts
+
   // If type is complex - invoke getType recursive.
   // If type is simple:
   // get unified type for Ty, and put its UID.
@@ -600,7 +626,201 @@ void FunctionComparator::getTypeUID(UIDPartsType &UID, const Type *Ty) {
   }
 }
 
-void FunctionComparator::getStringUID(UIDPartsType &UID, StringRef V) {
+void UIDGenerator::getValueUID(UIDPartsType &UID,
+                                     const Function *F, const Value *V, ) {
+  // Check for function @f referring to itself, put ZERO in this case.
+  if (F == V) {
+    UID.push_back(0);
+    return;
+  }
+
+  // Stepan Dyatkovskiy: TODO
+  if (const Constant *C1 = dyn_cast<Constant>(V1)) {
+      getConstantUID(UID, C1);
+      return;
+  }
+
+  if (isa<InlineAsm>(V)) {
+    UID.push_back(V);
+    return;
+  }
+
+  UID.push_back(getShortUID(V));
+}
+
+void UIDGenerator::getConstantUID(UIDPartsType &UID,
+                                  const Constant *C, bool WithType) {
+
+  Type::TypeID TyID = C->getType()->getTypeID();
+  assert(TyID == Type::IntegerTyID ||
+         TyID == Type::FloatTyID ||
+         TyID == Type::ArrayTyID ||
+         TyID == Type::StructTyID ||
+         TyID == Type::VectorTyID ||
+         isa<UndefValue>(C)
+        );
+
+  if (WithType)
+    getTypeUID(UID, C->getType());
+
+  if (const ConstantInt *CI = dyn_cast<ConstantInt>(C)) {
+    getAPIntUID(UID, CI->getValue());
+  }
+
+  if (const ConstantFP *CF = dyn_cast<ConstantFP>(C)) {
+    getAPFloatUID(UID, CF->getValueAPF());
+  }
+
+  if (const ConstantArray *CA = dyn_cast<ConstantArray>(C)) {
+    const ArrayType *AT = CA->getType();
+    uint64_t NumElements = AT->getNumElements();
+    UID.push_back(NumElements);
+    for (uint64_t i = 0; i < NumElements; ++i)
+      getConstantUID(UID, cast<Constant>(CA->getOperand(i)), false);
+  }
+
+  if (const ConstantStruct *CS = dyn_cast<ConstantStruct>(C)) {
+    const StructType *ST = cast<StructType>(CS->getType());
+    UID.push_back(ST->getNumElements());
+    for (unsigned i = 0, e = ST->getNumElements(); i != e; ++i)
+      getConstantUID(UID, cast<Constant>(CS->getOperand(i)), false);
+  }
+
+  if (const ConstantVector *CV = dyn_cast<ConstantVector>(C)) {
+    const VectorType *VT = CA->getType();
+    uint64_t NumElements = VT->getNumElements();
+    UID.push_back(NumElements);
+    for (uint64_t i = 0; i < NumElements; ++i)
+      getConstantUID(UID, cast<Constant>(CV->getOperand(i)), false);
+  }
+
+  if (const UndefValue *CU = dyn_cast<UndefValue>(C)) {
+    UID.push_back(~0);
+  }
+}
+
+void UIDGenerator::getBBUID(UIDPartsType &UID, const BasicBlock *BB) {
+  BasicBlock::const_iterator FI = BB1->begin(), F1E = BB1->end();
+
+  UID.push_back(BB->size());
+
+  do {
+//    if (!enumerate(FI, F2I))
+//      return false;
+    getShortUID((const Value*)FI);
+
+    if (const GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(FI)) {
+      //      const GetElementPtrInst *GEP2 = dyn_cast<GetElementPtrInst>(F2I);
+      //      if (!GEP2)
+      //        return false;
+      //
+      //      if (!enumerate(GEP1->getPointerOperand(), GEP2->getPointerOperand()))
+      //        return false;
+      //
+      //      if (!isEquivalentGEP(GEP1, GEP2))
+      //        return false;
+      getGEPUID(UID, GEP);
+    } else {
+      getOpCodeUID(UID, (const Instruction*)FI);
+      UID.push_back(FI->getNumOperands());
+      for (unsigned i = 0, e = FI->getNumOperands(); i != e; ++i) {
+        const Value *Op = FI->getOperand(i);
+        getValueUID(UID, BB->getParent(), Op);
+      }
+//      if (!isEquivalentOperation(FI, F2I))
+//        return false;
+//
+//      assert(FI->getNumOperands() == F2I->getNumOperands());
+//      for (unsigned i = 0, e = FI->getNumOperands(); i != e; ++i) {
+//        Value *OpF1 = FI->getOperand(i);
+//        Value *OpF2 = F2I->getOperand(i);
+//
+//        if (!enumerate(OpF1, OpF2))
+//          return false;
+//
+//        if (OpF1->getValueID() != OpF2->getValueID() ||
+//            !isEquivalentType(OpF1->getType(), OpF2->getType()))
+//          return false;
+//      }
+    }
+
+    ++FI;
+  } while (FI != F1E);
+}
+
+void UIDGenerator::getOpCodeUID(UIDPartsType &UID, const Instruction *I) {
+//  // Differences from Instruction::isSameOperationAs:
+//  //  * replace type comparison with calls to isEquivalentType.
+//  //  * we test for I->hasSameSubclassOptionalData (nuw/nsw/tail) at the top
+//  //  * because of the above, we don't test for the tail bit on calls later on
+//  if (I1->getOpcode() != I2->getOpcode() ||
+//      I1->getNumOperands() != I2->getNumOperands() ||
+//      !isEquivalentType(I1->getType(), I2->getType()) ||
+//      !I1->hasSameSubclassOptionalData(I2))
+//    return false;
+  UID.push_back(I->getOpcode());
+  UID.push_back(I->getNumOperands());
+  getTypeUID(UID, I->getType());
+  UID.push_back(I->getRawSubclassOptionalData());
+
+//  // We have two instructions of identical opcode and #operands.  Check to see
+//  // if all operands are the same type
+//  for (unsigned i = 0, e = I1->getNumOperands(); i != e; ++i)
+//    if (!isEquivalentType(I1->getOperand(i)->getType(),
+//                          I2->getOperand(i)->getType()))
+//      return false;
+  for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i)
+    getTypeUID(UID, I->getOperand(i)->getType());
+
+  // Check special state that is a part of some instructions.
+//  if (const LoadInst *LI = dyn_cast<LoadInst>(I1))
+//    return LI->isVolatile() == cast<LoadInst>(I2)->isVolatile() &&
+//           LI->getAlignment() == cast<LoadInst>(I2)->getAlignment() &&
+//           LI->getOrdering() == cast<LoadInst>(I2)->getOrdering() &&
+//           LI->getSynchScope() == cast<LoadInst>(I2)->getSynchScope();
+
+  if (isa<LoadInst>(I) ||
+      isa<StoreInst>(I) ||
+      isa<CmpInst>(I) ||
+      isa<FenceInst>(I) ||
+      isa<AtomicCmpXchgInst>(I) ||
+      isa<AtomicRMWInst>(I)) {
+    UID.push_back(I->getSubclassDataFromInstruction());
+    return;
+  }
+
+  if (const CallInst *CI = dyn_cast<CallInst>(I1)) {
+    UID.push_back(CI->getCallingConv());
+    getAttributesUID(UID, CI->getAttributes());
+    return;
+  }
+
+  if (const InvokeInst *CI = dyn_cast<InvokeInst>(I1)) {
+    UID.push_back(CI->getCallingConv());
+    getAttributesUID(UID, CI->getAttributes());
+    return;
+  }
+
+  if (const InsertValueInst *IVI = dyn_cast<InsertValueInst>(I1)) {
+    ArrayRef<unsigned> Indices = IVI->getIndices();
+    UID.push_back(Indices.size());
+    for (unsigned i = 0, e = Indices.size(); i != e; ++i)
+      UID.push_back(Indices[i]);
+    return;
+  }
+
+  if (const ExtractValueInst *EVI = dyn_cast<ExtractValueInst>(I1)) {
+    ArrayRef<unsigned> Indices = EVI->getIndices();
+    UID.push_back(Indices.size());
+    for (unsigned i = 0, e = Indices.size(); i != e; ++i)
+      UID.push_back(Indices[i]);
+    return;
+  }
+
+  llvm_unreachable("Did you miss something?");
+}
+
+void UIDGenerator::getStringUID(UIDPartsType &UID, StringRef V) {
   UID.insert(UID.end(), V.begin(), V.end());
 }
 
