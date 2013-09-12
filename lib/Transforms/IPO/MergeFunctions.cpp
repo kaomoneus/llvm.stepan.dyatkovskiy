@@ -238,7 +238,7 @@ public:
   void getFuncUID(UIDPartsType &UID, const Function *F);
 
 private:
-  void getAttributesUID(UIDPartsType &UID, const Function *F);
+  void getAttributesUID(UIDPartsType &UID, const AttributeSet AS);
   void getTypeUID(UIDPartsType &UID, const Type *Ty);
   void getValueUID(UIDPartsType &UID, const Function *F, const Value *V);
   void getConstantUID(UIDPartsType &UID, const Constant *C,
@@ -251,16 +251,16 @@ private:
   void getStringUID(UIDPartsType &UID, const StringRef V);
 
   UIDPartType getShortUID(const Value *V) {
-    std::pair<DenseMap<const Value, UIDPartType>, bool> res =
+    std::pair<DenseMap<const Value*, UIDPartType>::iterator, bool> res =
         ValueToShortUID.insert(std::make_pair(V, NextShortUID));
     if (res.second)
       return NextShortUID++;
     else
-      return res.first.second;
+      return res.first->second;
   }
 
   UIDPartType NextShortUID;
-  DenseMap<const Value, UIDPartType> ValueToShortUID;
+  DenseMap<const Value*, UIDPartType> ValueToShortUID;
 
   const DataLayout *TD;
 };
@@ -491,7 +491,7 @@ bool FunctionComparator::isEquivalentGEP(const GEPOperator *GEP1,
 /// This method encodes function into set of unsigned numbers,
 /// similar to bitcode writer, but simplier.
 void UIDGenerator::getFuncUID(UIDPartsType &UID, const Function *F) {
-  getAttributesUID(UID, F);
+  getAttributesUID(UID, F->getAttributes());
   UID.push_back(F->hasGC() ? (UIDPartType)F->getGC() : 0);
   UID.push_back(F->hasSection());
   if (!F->getSection().empty())
@@ -533,9 +533,7 @@ void UIDGenerator::getFuncUID(UIDPartsType &UID, const Function *F) {
   }
 }
 
-void UIDGenerator::getAttributesUID(UIDPartsType &UID,
-                                          const Function* F) {
-  AttributeSet AS = F->getAttributes();
+void UIDGenerator::getAttributesUID(UIDPartsType &UID, const AttributeSet AS) {
   // Mostly cloned from BitcodeWriter, but simplified a bit.
   for (unsigned i = 0, e = AS.getNumSlots(); i != e; ++i) {
     UID.push_back(AS.getSlotIndex(i));
@@ -629,7 +627,7 @@ void UIDGenerator::getTypeUID(UIDPartsType &UID, const Type *Ty) {
 }
 
 void UIDGenerator::getValueUID(UIDPartsType &UID,
-                                     const Function *F, const Value *V, ) {
+                                     const Function *F, const Value *V) {
   // Check for function @f referring to itself, put ZERO in this case.
   if (F == V) {
     UID.push_back(0);
@@ -637,13 +635,13 @@ void UIDGenerator::getValueUID(UIDPartsType &UID,
   }
 
   // Stepan Dyatkovskiy: TODO
-  if (const Constant *C1 = dyn_cast<Constant>(V1)) {
-      getConstantUID(UID, C1);
+  if (const Constant *C = dyn_cast<Constant>(V)) {
+      getConstantUID(UID, C);
       return;
   }
 
   if (isa<InlineAsm>(V)) {
-    UID.push_back(V);
+    UID.push_back((UIDPartType)V);
     return;
   }
 
@@ -689,21 +687,21 @@ void UIDGenerator::getConstantUID(UIDPartsType &UID,
   }
 
   if (const ConstantVector *CV = dyn_cast<ConstantVector>(C)) {
-    const VectorType *VT = CA->getType();
+    const VectorType *VT = CV->getType();
     uint64_t NumElements = VT->getNumElements();
     UID.push_back(NumElements);
     for (uint64_t i = 0; i < NumElements; ++i)
       getConstantUID(UID, cast<Constant>(CV->getOperand(i)), false);
   }
 
-  if (const UndefValue *CU = dyn_cast<UndefValue>(C)) {
+  if (isa<UndefValue>(C)) {
     UID.push_back(~0);
   }
 }
 
 void UIDGenerator::getAPIntUID(UIDPartsType &UID, const APInt &V) {
   UID.push_back(V.getActiveBits());
-  uint64_t *raw = V.getRawData();
+  const uint64_t *raw = V.getRawData();
   for (unsigned w = 0, e = V.getActiveWords(); w != e; ++w)
     UID.push_back(raw[w]);
 }
@@ -713,14 +711,12 @@ void UIDGenerator::getAPFloatUID(UIDPartsType &UID, const APFloat &V) {
   // with different internal semantics.
   // Also even for same floats different semantics always assume very
   // small, but error. And this error could do bad things sometimes.
-  UID.push_back(V.getSemantics().minExponent);
-  UID.push_back(V.getSemantics().maxExponent);
-  UID.push_back(V.getSemantics().precision);
+  UID.push_back((UIDPartType)&V.getSemantics());
   getAPIntUID(UID, V.bitcastToAPInt());
 }
 
 void UIDGenerator::getBBUID(UIDPartsType &UID, const BasicBlock *BB) {
-  BasicBlock::const_iterator FI = BB1->begin(), F1E = BB1->end();
+  BasicBlock::const_iterator FI = BB->begin(), FE = BB->end();
 
   UID.push_back(BB->size());
 
@@ -739,7 +735,7 @@ void UIDGenerator::getBBUID(UIDPartsType &UID, const BasicBlock *BB) {
       //
       //      if (!isEquivalentGEP(GEP1, GEP2))
       //        return false;
-      getGEPUID(UID, GEP);
+      getGEPUID(UID, cast<GEPOperator>(GEP));
     } else {
       getOpCodeUID(UID, (const Instruction*)FI);
       UID.push_back(FI->getNumOperands());
@@ -765,7 +761,7 @@ void UIDGenerator::getBBUID(UIDPartsType &UID, const BasicBlock *BB) {
     }
 
     ++FI;
-  } while (FI != F1E);
+  } while (FI != FE);
 }
 
 void UIDGenerator::getGEPUID(UIDPartsType &UID, const GEPOperator *GEP) {
@@ -799,11 +795,8 @@ void UIDGenerator::getGEPUID(UIDPartsType &UID, const GEPOperator *GEP) {
 //    if (!enumerate(GEP1->getOperand(i), GEP2->getOperand(i)))
 //      return false;
 //  }
-    for (unsigned i = 0, e = GEP1->getNumOperands(); i != e; ++i) {
-      UID.push_back(getShortUID(GEP->getOperand(i)));
-    }
-
-  return true;
+  for (unsigned i = 0, e = GEP->getNumOperands(); i != e; ++i)
+    UID.push_back(getShortUID(GEP->getOperand(i)));
 }
 
 void UIDGenerator::getOpCodeUID(UIDPartsType &UID, const Instruction *I) {
@@ -837,45 +830,46 @@ void UIDGenerator::getOpCodeUID(UIDPartsType &UID, const Instruction *I) {
 //           LI->getOrdering() == cast<LoadInst>(I2)->getOrdering() &&
 //           LI->getSynchScope() == cast<LoadInst>(I2)->getSynchScope();
 
-  if (isa<LoadInst>(I) ||
-      isa<StoreInst>(I) ||
-      isa<CmpInst>(I) ||
-      isa<FenceInst>(I) ||
-      isa<AtomicCmpXchgInst>(I) ||
-      isa<AtomicRMWInst>(I)) {
-    UID.push_back(I->getSubclassDataFromInstruction());
-    return;
-  }
-
-  if (const CallInst *CI = dyn_cast<CallInst>(I1)) {
+  if (const LoadInst *LI = dyn_cast<LoadInst>(I)) {
+    UID.push_back(LI->isVolatile());
+    UID.push_back(LI->getAlignment());
+    UID.push_back(LI->getOrdering());
+    UID.push_back(LI->getSynchScope());
+  } else if (const StoreInst *SI = dyn_cast<StoreInst>(I)) {
+    UID.push_back(SI->isVolatile());
+    UID.push_back(SI->getAlignment());
+    UID.push_back(SI->getOrdering());
+    UID.push_back(SI->getSynchScope());
+  } else if (const CmpInst *CI = dyn_cast<CmpInst>(I))
+    UID.push_back(CI->getPredicate());
+  else if (const CallInst *CI = dyn_cast<CallInst>(I)) {
     UID.push_back(CI->getCallingConv());
     getAttributesUID(UID, CI->getAttributes());
-    return;
-  }
-
-  if (const InvokeInst *CI = dyn_cast<InvokeInst>(I1)) {
+  } if (const InvokeInst *CI = dyn_cast<InvokeInst>(I)) {
     UID.push_back(CI->getCallingConv());
     getAttributesUID(UID, CI->getAttributes());
-    return;
-  }
-
-  if (const InsertValueInst *IVI = dyn_cast<InsertValueInst>(I1)) {
+  } else if (const InsertValueInst *IVI = dyn_cast<InsertValueInst>(I)) {
     ArrayRef<unsigned> Indices = IVI->getIndices();
     UID.push_back(Indices.size());
     for (unsigned i = 0, e = Indices.size(); i != e; ++i)
       UID.push_back(Indices[i]);
-    return;
-  }
-
-  if (const ExtractValueInst *EVI = dyn_cast<ExtractValueInst>(I1)) {
+  } else if (const ExtractValueInst *EVI = dyn_cast<ExtractValueInst>(I)) {
     ArrayRef<unsigned> Indices = EVI->getIndices();
     UID.push_back(Indices.size());
     for (unsigned i = 0, e = Indices.size(); i != e; ++i)
       UID.push_back(Indices[i]);
-    return;
+  } else if (const FenceInst *FI = dyn_cast<FenceInst>(I)) {
+    UID.push_back(FI->getOrdering());
+    UID.push_back(FI->getSynchScope());
+  } else if (const AtomicCmpXchgInst *CXI = dyn_cast<AtomicCmpXchgInst>(I)) {
+    UID.push_back(CXI->isVolatile());
+    UID.push_back(CXI->getOrdering());
+    UID.push_back(CXI->getSynchScope());
+  } else if (const AtomicRMWInst *RMWI = dyn_cast<AtomicRMWInst>(I)) {
+    UID.push_back(RMWI->isVolatile());
+    UID.push_back(RMWI->getOrdering());
+    UID.push_back(RMWI->getSynchScope());
   }
-
-  llvm_unreachable("Did you miss something?");
 }
 
 void UIDGenerator::getStringUID(UIDPartsType &UID, StringRef V) {
