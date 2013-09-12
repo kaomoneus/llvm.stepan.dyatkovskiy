@@ -701,6 +701,24 @@ void UIDGenerator::getConstantUID(UIDPartsType &UID,
   }
 }
 
+void UIDGenerator::getAPIntUID(UIDPartsType &UID, const APInt &V) {
+  UID.push_back(V.getActiveBits());
+  uint64_t *raw = V.getRawData();
+  for (unsigned w = 0, e = V.getActiveWords(); w != e; ++w)
+    UID.push_back(raw[w]);
+}
+
+void UIDGenerator::getAPFloatUID(UIDPartsType &UID, const APFloat &V) {
+  // Sometimes it impossible to attach the same UID for same floats but
+  // with different internal semantics.
+  // Also even for same floats different semantics always assume very
+  // small, but error. And this error could do bad things sometimes.
+  UID.push_back(V.getSemantics().minExponent);
+  UID.push_back(V.getSemantics().maxExponent);
+  UID.push_back(V.getSemantics().precision);
+  getAPIntUID(UID, V.bitcastToAPInt());
+}
+
 void UIDGenerator::getBBUID(UIDPartsType &UID, const BasicBlock *BB) {
   BasicBlock::const_iterator FI = BB1->begin(), F1E = BB1->end();
 
