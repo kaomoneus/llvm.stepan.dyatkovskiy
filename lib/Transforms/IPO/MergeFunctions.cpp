@@ -261,6 +261,8 @@ private:
 
   UIDPartType NextShortUID;
   DenseMap<const Value, UIDPartType> ValueToShortUID;
+
+  const DataLayout *TD;
 };
 
 /// FunctionComparator - Compares two functions to determine whether or not
@@ -746,6 +748,44 @@ void UIDGenerator::getBBUID(UIDPartsType &UID, const BasicBlock *BB) {
 
     ++FI;
   } while (FI != F1E);
+}
+
+void UIDGenerator::getGEPUID(UIDPartsType &UID, const GEPOperator *GEP) {
+  // When we have target data, we can reduce the GEP down to the value in bytes
+  // added to the address.
+  unsigned BitWidth = TD ? TD->getPointerSizeInBits() : 1;
+
+//  APInt Offset1(BitWidth, 0), Offset2(BitWidth, 0);
+//  if (TD &&
+//      GEP1->accumulateConstantOffset(*TD, Offset1) &&
+//      GEP2->accumulateConstantOffset(*TD, Offset2)) {
+//    return Offset1 == Offset2;
+//  }
+  APInt Offset(BitWidth, 0);
+  if (TD)
+    GEP->accumulateConstantOffset(*TD, Offset);
+
+  getAPIntUID(UID, Offset);
+
+//  if (GEP1->getPointerOperand()->getType() !=
+//      GEP2->getPointerOperand()->getType())
+//    return false;
+  getTypeUID(UID, GEP->getPointerOperandType());
+
+//  if (GEP1->getNumOperands() != GEP2->getNumOperands())
+//    return false;
+  UID.push_back(GEP->getNumOperands());
+
+
+//  for (unsigned i = 0, e = GEP1->getNumOperands(); i != e; ++i) {
+//    if (!enumerate(GEP1->getOperand(i), GEP2->getOperand(i)))
+//      return false;
+//  }
+    for (unsigned i = 0, e = GEP1->getNumOperands(); i != e; ++i) {
+      UID.push_back(getShortUID(GEP->getOperand(i)));
+    }
+
+  return true;
 }
 
 void UIDGenerator::getOpCodeUID(UIDPartsType &UID, const Instruction *I) {
