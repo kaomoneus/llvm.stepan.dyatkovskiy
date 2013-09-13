@@ -239,13 +239,28 @@ class UIDGenerator {
 public:
 
   enum PartSemantics {
-    ComplexSectionTag
+    ComplexSectionTag,
+    Number,
+    Flag,
+    Enum,
+    Pointer,
+    Characters
   };
 
   static StringRef getSemanticsName(PartSemantics S) {
     switch (S) {
     case ComplexSectionTag:
       return "ComplexSection";
+    case Number:
+      return "Number";
+    case Flag:
+      return "Flag";
+    case Enum:
+      return "Enum";
+    case Pointer:
+      return "Pointer";
+    case Characters:
+      return "Characters";
     }
     return "Unknown";
   }
