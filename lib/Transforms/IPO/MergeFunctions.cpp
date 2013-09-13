@@ -68,7 +68,9 @@
 #include "llvm/Support/ValueHandle.h"
 #include "llvm/Support/raw_ostream.h"
 #include <ctime>
+#include <string>
 #include <vector>
+#include <list>
 using namespace llvm;
 
 STATISTIC(NumFunctionsMerged, "Number of functions merged");
@@ -235,6 +237,80 @@ class UIDGenerator {
   typedef std::vector<UIDPartType> UIDPartsType;
 
 public:
+
+  enum PartSemantics {
+    ComplexSectionTag
+  };
+
+  static StringRef getSemanticsName(PartSemantics S) {
+    switch (S) {
+    case ComplexSectionTag:
+      return "ComplexSection";
+    }
+    return "Unknown";
+  }
+
+  class Section {
+    typedef std::list<Section> SubSectionsType;
+  public:
+    Section* subSection(StringRef Name) {
+      Subsections.push_back(Section(UID, Name));
+      return &Subsections.back();
+    }
+    void putPart(PartSemantics Semantics, UIDPartType V) {
+      Subsections.push_back(Section(UID, Semantics, V));
+    }
+    void close() {
+      SectionEnd = UID->size();
+    }
+    void dump(unsigned indent = 0) const {
+      dbgs().indent(indent);
+      if (!Name.empty())
+        dbgs() << Name << " ";
+      dbgs() << UIDGenerator::getSemanticsName(SectionSemantics) << " ";
+      if (Subsections.empty()) {
+        dbgs() << ":\n";
+        for (size_t i = SectionStart; i != SectionEnd; ++i)
+          dbgs().indent(indent + 2).write_hex((*UID)[i]) << "\n";
+      } else {
+        dbgs() << "{\n";
+        for (SubSectionsType::const_iterator
+             i = Subsections.begin(), e = Subsections.end(); i != e; ++i) {
+          i->dump(indent + 2);
+        }
+        dbgs().indent(indent) << "}\n";
+      }
+    }
+
+  protected:
+    Section(UIDPartsType* UIDRef, StringRef NameRef) {
+      UID = UIDRef;
+      Name = NameRef;
+      SectionSemantics = ComplexSectionTag;
+
+      SectionStart = UID->size();
+      SectionEnd = SectionStart + 1;
+      UID->push_back(ComplexSectionTag);
+    }
+    Section(UIDPartsType* UIDRef, PartSemantics Semantics, UIDPartType V) {
+          UID = UIDRef;
+          SectionStart = UID->size();
+          SectionSemantics = Semantics;
+          UID->push_back(Semantics);
+          UID->push_back(V);
+          close();
+    }
+
+    UIDPartsType* UID;
+    std::string Name;
+    PartSemantics SectionSemantics;
+
+    size_t SectionStart;
+    size_t SectionEnd;
+
+    SubSectionsType Subsections;
+  };
+
   void getFuncUID(UIDPartsType &UID, const Function *F);
 
 private:
