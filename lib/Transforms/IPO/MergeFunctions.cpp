@@ -239,27 +239,47 @@ class UIDGenerator {
 public:
 
   enum PartSemantics {
-    ComplexSectionTag,
-    Number,
-    Flag,
-    Enum,
-    Pointer,
-    Characters
+    SemanticsComplexSectionTag,
+    SemanticsNumber,
+    SemanticsFlag,
+    SemanticsEnum,
+    SemanticsPointer,
+    SemanticsCharacters
+  };
+
+  enum SubsectionType {
+    SubSectRoot,
+    SubSectAttributes,
+    SubSectAttrSlot,
+    SubSectType,
+    SubSectValue,
+    SubSectConstant,
+    SubSectConstantArray,
+    SubSectConstantStruct,
+    SubSectConstantVector,
+    SubSectAPInt,
+    SubSectAPFloat,
+    SubSectBB,
+    SubSectBBOp,
+    SubSectBBOpGEP,
+    SubSectBBOpNonGEP,
+    SubSectOpCode,
+    SubSectString
   };
 
   static StringRef getSemanticsName(PartSemantics S) {
     switch (S) {
-    case ComplexSectionTag:
+    case SemanticsComplexSectionTag:
       return "ComplexSection";
-    case Number:
+    case SemanticsNumber:
       return "Number";
-    case Flag:
+    case SemanticsFlag:
       return "Flag";
-    case Enum:
+    case SemanticsEnum:
       return "Enum";
-    case Pointer:
+    case SemanticsPointer:
       return "Pointer";
-    case Characters:
+    case SemanticsCharacters:
       return "Characters";
     }
     return "Unknown";
@@ -268,12 +288,35 @@ public:
   class Section {
     typedef std::list<Section> SubSectionsType;
   public:
-    Section* subSection(StringRef Name) {
-      Subsections.push_back(Section(UID, Name));
+    Section* subSection(StringRef Name, SubsectionType SSType) {
+      Subsections.push_back(Section(Generator, Name, SSType));
       return &Subsections.back();
     }
+
+    void putFunctionAttributes(StringRef Name, const AttributeSet AS);
+
+    void putType(StringRef Name, const Type *Ty);
+    void putValue(StringRef Name, const Function *F, const Value *V);
+    void putConstant(StringRef Name, const Constant *C, bool WithType = true);
+    void putAPInt(StringRef Name, const APInt &V);
+    void putAPFloat(StringRef Name, const APFloat &V);
+    void putBB(StringRef Name, const BasicBlock *BB);
+    void putGEP(StringRef Name, const GEPOperator *GEP);
+    void putOpCode(StringRef Name, const Instruction* I);
+
+    void putString(StringRef Name, StringRef V) {
+      Section *StringSection = subSection(Name, SubSectString);
+        StringSection->putPart("Length", SemanticsNumber, V.size());
+        UID->insert(UID->end(), V.begin(), V.end());
+      StringSection->close();
+    }
+
     void putPart(PartSemantics Semantics, UIDPartType V) {
-      Subsections.push_back(Section(UID, Semantics, V));
+      putPart(std::string(), Semantics, V);
+    }
+
+    void putPart(StringRef Name, PartSemantics Semantics, UIDPartType V) {
+      Subsections.push_back(Section(Generator, Name, Semantics, V));
     }
     void close() {
       SectionEnd = UID->size();
@@ -298,25 +341,36 @@ public:
     }
 
   protected:
-    Section(UIDPartsType* UIDRef, StringRef NameRef) {
-      UID = UIDRef;
+    Section(UIDGenerator *Gen,
+            StringRef NameRef, SubsectionType SSTy) {
+      Generator = Gen;
+      UID = Gen->getUID();
+      TD = Gen->getTD();
       Name = NameRef;
-      SectionSemantics = ComplexSectionTag;
+      SectionSemantics = SemanticsComplexSectionTag;
 
       SectionStart = UID->size();
       SectionEnd = SectionStart + 1;
-      UID->push_back(ComplexSectionTag);
+      UID->push_back(SemanticsComplexSectionTag);
+      UID->push_back(SSTy);
     }
-    Section(UIDPartsType* UIDRef, PartSemantics Semantics, UIDPartType V) {
-          UID = UIDRef;
-          SectionStart = UID->size();
-          SectionSemantics = Semantics;
-          UID->push_back(Semantics);
-          UID->push_back(V);
-          close();
+    Section(UIDGenerator *Gen,
+            StringRef _Name, PartSemantics Semantics,
+            UIDPartType V) {
+      Generator = Gen;
+      UID = Gen->getUID();
+      TD = Gen->getTD();
+      Name = _Name;
+      SectionStart = UID->size();
+      SectionSemantics = Semantics;
+      UID->push_back(Semantics);
+      UID->push_back(V);
+      close();
     }
 
-    UIDPartsType* UID;
+    UIDGenerator *Generator;
+    UIDPartsType *UID;
+    const DataLayout *TD;
     std::string Name;
     PartSemantics SectionSemantics;
 
@@ -324,12 +378,24 @@ public:
     size_t SectionEnd;
 
     SubSectionsType Subsections;
+
+    friend class UIDGenerator;
   };
 
-  void getFuncUID(UIDPartsType &UID, const Function *F);
+  UIDGenerator(const Function *_F) :
+    RootSection(this, "Root", SubSectRoot),
+    F(_F)
+  {}
+
+  void getFuncUID();
 
 private:
-  void getAttributesUID(UIDPartsType &UID, const AttributeSet AS);
+
+  UIDPartsType *getUID();
+  DataLayout *getTD();
+  friend class Section;
+
+  void getAttributesUID(Section *UID, const AttributeSet AS);
   void getTypeUID(UIDPartsType &UID, const Type *Ty);
   void getValueUID(UIDPartsType &UID, const Function *F, const Value *V);
   void getConstantUID(UIDPartsType &UID, const Constant *C,
@@ -354,6 +420,10 @@ private:
   DenseMap<const Value*, UIDPartType> ValueToShortUID;
 
   const DataLayout *TD;
+
+  UIDPartsType UID;
+  Section RootSection;
+  const Function *F;
 };
 
 /// FunctionComparator - Compares two functions to determine whether or not
@@ -581,21 +651,23 @@ bool FunctionComparator::isEquivalentGEP(const GEPOperator *GEP1,
 /// method.
 /// This method encodes function into set of unsigned numbers,
 /// similar to bitcode writer, but simplier.
-void UIDGenerator::getFuncUID(UIDPartsType &UID, const Function *F) {
-  getAttributesUID(UID, F->getAttributes());
-  UID.push_back(F->hasGC() ? (UIDPartType)F->getGC() : 0);
-  UID.push_back(F->hasSection());
+void UIDGenerator::getFuncUID() {
+  RootSection.putFunctionAttributes("FunctionAttributes", F->getAttributes());
+  RootSection.putPart("GC", SemanticsPointer,
+                      F->hasGC() ? (UIDPartType)F->getGC() : 0);
+  RootSection.putPart("HasSection", SemanticsFlag, F->hasSection());
   if (!F->getSection().empty())
-    getStringUID(UID, F->getSection());
-  UID.push_back(F->isVarArg());
-  UID.push_back(F->getCallingConv());
-  getTypeUID(UID, F->getFunctionType());
+    RootSection.putString("FunctionSection", F->getSection());
+
+  RootSection.putPart("VarArg", SemanticsFlag, F->isVarArg());
+  RootSection.putPart("CallingConv", SemanticsEnum, F->getCallingConv());
+  RootSection.putType("FunctionType", F->getFunctionType());
 
   // Visit the arguments so that they get enumerated in the order they're
   // passed in.
   for (Function::const_arg_iterator fi = F->arg_begin(),
        fe = F->arg_end(); fi != fe; ++fi) {
-    getValueUID(UID, F, (const Value*)fi);
+    RootSection.putValue("Arg", F, (const Value*)fi);
   }
 
   // We do a CFG-ordered walk since the actual ordering of the blocks in the
@@ -611,7 +683,7 @@ void UIDGenerator::getFuncUID(UIDPartsType &UID, const Function *F) {
   while (!BBs.empty()) {
     const BasicBlock *BB = BBs.pop_back_val();
 
-    getBBUID(UID, BB);
+    RootSection.putBB("BB", BB);
 
     const TerminatorInst *TI = BB->getTerminator();
 
@@ -624,36 +696,50 @@ void UIDGenerator::getFuncUID(UIDPartsType &UID, const Function *F) {
   }
 }
 
-void UIDGenerator::getAttributesUID(UIDPartsType &UID, const AttributeSet AS) {
+void UIDGenerator::Section::putFunctionAttributes(StringRef Name,
+                                                  const AttributeSet AS) {
+  Section *AttrsSection = subSection(Name, SubSectAttributes);
   // Mostly cloned from BitcodeWriter, but simplified a bit.
   for (unsigned i = 0, e = AS.getNumSlots(); i != e; ++i) {
-    UID.push_back(AS.getSlotIndex(i));
+    Section *AttrSlot = AttrsSection->subSection("Slot", SubSectAttrSlot);
+    AttrSlot->putPart("Index", SemanticsNumber, AS.getSlotIndex(i));
     for (AttributeSet::iterator I = AS.begin(i), E = AS.end(i);
      I != E; ++I) {
       Attribute Attr = *I;
+
       if (Attr.isEnumAttribute()) {
-        UID.push_back(0);
-        UID.push_back(Attr.getKindAsEnum());
+        AttrSlot->putPart("EnumAlignOther", SemanticsEnum, 0);
+        AttrSlot->putPart("KindAsEnum", SemanticsEnum, Attr.getKindAsEnum());
       } else if (Attr.isAlignAttribute()) {
-        UID.push_back(1);
-        UID.push_back(Attr.getKindAsEnum());
-        UID.push_back(Attr.getValueAsInt());
+        AttrSlot->putPart("EnumAlignOther", SemanticsEnum, 1);
+        AttrSlot->putPart("KindAsEnum", SemanticsEnum, Attr.getKindAsEnum());
+        AttrSlot->putPart("ValueAsInt", SemanticsNumber, Attr.getValueAsInt());
       } else {
+        AttrSlot->putPart("EnumAlignOther", SemanticsEnum, 2);
         StringRef Kind = Attr.getKindAsString();
-        UID.push_back(Kind.size());
-        getStringUID(UID, Kind);
+        AttrSlot->putString("KindAsString", Kind);
         StringRef Val = Attr.getValueAsString();
-        UID.push_back(Val.size());
         if (!Val.empty())
-          getStringUID(UID, Val);
+          AttrSlot->putString("ValAsString", Val);
       }
     }
   }
 }
 
-void UIDGenerator::getTypeUID(UIDPartsType &UID, const Type *Ty) {
+void UIDGenerator::Section::putType(StringRef Name, const Type *Ty) {
+
+  Section *SectionType = subSection(Name, SubSectType);
 
   // TODO: Lossless bitcasts
+  enum UIDTypeID {
+    IntegerUID,
+    VoidUID,
+    PointerUID,
+    StringUID,
+    StructUID,
+    FunctionUID,
+    ArrayUID
+  };
 
   // If type is complex - invoke getType recursive.
   // If type is simple:
@@ -665,10 +751,9 @@ void UIDGenerator::getTypeUID(UIDPartsType &UID, const Type *Ty) {
   case Type::IntegerTyID:
   case Type::VectorTyID:
     // Ty1 == Ty2 would have returned true earlier.
-    UID.push_back((UIDPartType)Ty);
+    SectionType->putPart("TypeID", SemanticsEnum, IntegerUID);
     break;
 
-  case Type::VoidTyID:
   case Type::FloatTyID:
   case Type::DoubleTyID:
   case Type::X86_FP80TyID:
@@ -676,71 +761,78 @@ void UIDGenerator::getTypeUID(UIDPartsType &UID, const Type *Ty) {
   case Type::PPC_FP128TyID:
   case Type::LabelTyID:
   case Type::MetadataTyID:
-    UID.push_back(Type::VoidTyID);
+    SectionType->putPart("TypeID", SemanticsEnum, VoidUID);
     break;
 
   case Type::PointerTyID: {
-    UID.push_back(Ty->getPointerAddressSpace());
+    SectionType->putPart("TypeID", SemanticsEnum, PointerUID);
+    SectionType->putPart("AddressSpace", SemanticsEnum,
+                         Ty->getPointerAddressSpace());
     LLVMContext &Ctx = Ty->getContext();
-    UID.push_back((UIDPartType)(TD->getIntPtrType(Ctx)));
+    SectionType->putPart("IntID", SemanticsEnum,
+                         (UIDPartType)(TD->getIntPtrType(Ctx)));
     break;
   }
 
   case Type::StructTyID: {
+    SectionType->putPart("TypeID", SemanticsEnum, StructUID);
     const StructType *STy = cast<StructType>(Ty);
-    UID.push_back(STy->getNumElements());
-    UID.push_back(STy->isPacked());
+    SectionType->putPart("NumElements", SemanticsNumber, STy->getNumElements());
+    SectionType->putPart("IsPacked", SemanticsFlag, STy->isPacked());
 
     for (unsigned i = 0, e = STy->getNumElements(); i != e; ++i)
-      getTypeUID(UID, STy->getElementType(i));
+      SectionType->putType("FieldType", STy->getElementType(i));
     break;
   }
 
   case Type::FunctionTyID: {
+    SectionType->putPart("TypeID", SemanticsEnum, FunctionUID);
     const FunctionType *FTy = cast<FunctionType>(Ty);
-    UID.push_back(FTy->getNumParams());
-    UID.push_back(FTy->isVarArg());
-    getTypeUID(UID, FTy->getReturnType());
+    SectionType->putPart("NumParams", SemanticsNumber, FTy->getNumParams());
+    SectionType->putPart("IsVarArg", SemanticsFlag, FTy->isVarArg());
+    SectionType->putType("ReturnType", FTy->getReturnType());
 
     for (unsigned i = 0, e = FTy->getNumParams(); i != e; ++i)
-      getTypeUID(UID, FTy->getParamType(i));
-
+      SectionType->putType("ArgType", FTy->getParamType(i));
     break;
   }
 
   case Type::ArrayTyID: {
+    SectionType->putPart("TypeID", SemanticsEnum, ArrayUID);
     const ArrayType *ATy = cast<ArrayType>(Ty);
-    UID.push_back(ATy->getNumElements());
-    getTypeUID(UID, ATy->getElementType());
+    SectionType->putPart("NumElements", SemanticsNumber, ATy->getNumElements());
+    SectionType->putType("ElementType", ATy->getElementType());
     break;
   }
   }
 }
 
-void UIDGenerator::getValueUID(UIDPartsType &UID,
+void UIDGenerator::Section::putValue(StringRef Name,
                                      const Function *F, const Value *V) {
+  Section *ValueSection = subSection(Name, SubSectValue);
   // Check for function @f referring to itself, put ZERO in this case.
   if (F == V) {
-    UID.push_back(0);
+    ValueSection->putPart("ValueContents", SemanticsPointer, 0);
     return;
   }
 
-  // Stepan Dyatkovskiy: TODO
   if (const Constant *C = dyn_cast<Constant>(V)) {
-      getConstantUID(UID, C);
+      ValueSection->putConstant("ValueContents", C);
       return;
   }
 
   if (isa<InlineAsm>(V)) {
-    UID.push_back((UIDPartType)V);
+    ValueSection->putPart("ValueContents", SemanticsPointer, (UIDPartType)V);
     return;
   }
 
-  UID.push_back(getShortUID(V));
+  ValueSection->putPart("ValueContents",
+                        SemanticsNumber, Generator->getShortUID(V));
 }
 
-void UIDGenerator::getConstantUID(UIDPartsType &UID,
-                                  const Constant *C, bool WithType) {
+void UIDGenerator::Section::putConstant(StringRef Name,
+                                        const Constant *C, bool WithType) {
+  Section *ConstantSection = subSection(Name, SubSectConstant);
 
   Type::TypeID TyID = C->getType()->getTypeID();
   assert(TyID == Type::IntegerTyID ||
@@ -752,69 +844,83 @@ void UIDGenerator::getConstantUID(UIDPartsType &UID,
         );
 
   if (WithType)
-    getTypeUID(UID, C->getType());
+    ConstantSection->putType("ConstantType", C->getType());
 
   if (const ConstantInt *CI = dyn_cast<ConstantInt>(C)) {
-    getAPIntUID(UID, CI->getValue());
+    ConstantSection->putAPInt("ConstantValue", CI->getValue());
   }
 
   if (const ConstantFP *CF = dyn_cast<ConstantFP>(C)) {
-    getAPFloatUID(UID, CF->getValueAPF());
+    ConstantSection->putAPFloat("ConstantValue", CF->getValueAPF());
   }
 
   if (const ConstantArray *CA = dyn_cast<ConstantArray>(C)) {
+    Section *ArraySection =
+        ConstantSection->subSection("ConstantValue", SubSectConstantArray);
     const ArrayType *AT = CA->getType();
     uint64_t NumElements = AT->getNumElements();
-    UID.push_back(NumElements);
     for (uint64_t i = 0; i < NumElements; ++i)
-      getConstantUID(UID, cast<Constant>(CA->getOperand(i)), false);
+      ArraySection->putConstant("Item",
+                                cast<Constant>(CA->getOperand(i)), false);
   }
 
   if (const ConstantStruct *CS = dyn_cast<ConstantStruct>(C)) {
+    Section *StructSection =
+        ConstantSection->subSection("ConstantValue", SubSectConstantStruct);
     const StructType *ST = cast<StructType>(CS->getType());
-    UID.push_back(ST->getNumElements());
     for (unsigned i = 0, e = ST->getNumElements(); i != e; ++i)
-      getConstantUID(UID, cast<Constant>(CS->getOperand(i)), false);
+      StructSection->putConstant("Item",
+                                 cast<Constant>(CS->getOperand(i)), false);
   }
 
   if (const ConstantVector *CV = dyn_cast<ConstantVector>(C)) {
+    Section *VectorSection =
+        ConstantSection->subSection("ConstantValue", SubSectConstantVector);
     const VectorType *VT = CV->getType();
     uint64_t NumElements = VT->getNumElements();
-    UID.push_back(NumElements);
     for (uint64_t i = 0; i < NumElements; ++i)
-      getConstantUID(UID, cast<Constant>(CV->getOperand(i)), false);
+      VectorSection->putConstant("Item",
+                                 cast<Constant>(CV->getOperand(i)), false);
   }
 
   if (isa<UndefValue>(C)) {
-    UID.push_back(~0);
+    ConstantSection->putPart("ConstantValue", SemanticsEnum, ~0);
   }
 }
 
-void UIDGenerator::getAPIntUID(UIDPartsType &UID, const APInt &V) {
-  UID.push_back(V.getActiveBits());
+void UIDGenerator::Section::putAPInt(StringRef Name, const APInt &V) {
+  Section *APIntSection = subSection(Name, SubSectAPInt);
+  APIntSection->putPart("ActiveBits", SemanticsNumber, V.getActiveBits());
   const uint64_t *raw = V.getRawData();
   for (unsigned w = 0, e = V.getActiveWords(); w != e; ++w)
-    UID.push_back(raw[w]);
+    APIntSection->putPart("Word", SemanticsNumber, raw[w]);
 }
 
-void UIDGenerator::getAPFloatUID(UIDPartsType &UID, const APFloat &V) {
+void UIDGenerator::Section::putAPFloat(StringRef Name, const APFloat &V) {
   // Sometimes it impossible to attach the same UID for same floats but
   // with different internal semantics.
   // Also even for same floats different semantics always assume very
   // small, but error. And this error could do bad things sometimes.
-  UID.push_back((UIDPartType)&V.getSemantics());
-  getAPIntUID(UID, V.bitcastToAPInt());
+  Section *APFloatSection = subSection(Name, SubSectAPFloat);
+  APFloatSection->putPart("FloatSemantics", SemanticsPointer,
+                          (UIDPartType)&V.getSemantics());
+  APFloatSection->putAPInt("FloatContents", V.bitcastToAPInt());
 }
 
-void UIDGenerator::getBBUID(UIDPartsType &UID, const BasicBlock *BB) {
+void UIDGenerator::Section::putBB(StringRef Name, const BasicBlock *BB) {
+
+  Section *BBSection = subSection(Name, SubSectBB);
+
   BasicBlock::const_iterator FI = BB->begin(), FE = BB->end();
 
-  UID.push_back(BB->size());
+  BBSection->putPart("Size", SemanticsNumber, BB->size());
 
   do {
+    Section *BBOpSection = BBSection->subSection("BBOp", SubSectBBOp);
 //    if (!enumerate(FI, F2I))
 //      return false;
-    getShortUID((const Value*)FI);
+    BBOpSection->putPart("ShortUID", SemanticsNumber,
+        Generator->getShortUID((const Value*)FI));
 
     if (const GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(FI)) {
       //      const GetElementPtrInst *GEP2 = dyn_cast<GetElementPtrInst>(F2I);
@@ -826,13 +932,16 @@ void UIDGenerator::getBBUID(UIDPartsType &UID, const BasicBlock *BB) {
       //
       //      if (!isEquivalentGEP(GEP1, GEP2))
       //        return false;
-      getGEPUID(UID, cast<GEPOperator>(GEP));
+      BBOpSection->putGEP("OperationContents", cast<GEPOperator>(GEP));
     } else {
-      getOpCodeUID(UID, (const Instruction*)FI);
-      UID.push_back(FI->getNumOperands());
+      Section *BBOpNonGEPSection =
+          BBOpSection->subSection("NonGEP", SubSectBBOpNonGEP);
+      BBOpNonGEPSection->putOpCode("NonGEPOpcode", (const Instruction*)FI);
+      BBOpNonGEPSection->putPart("NumOperands",
+                                 SemanticsNumber, FI->getNumOperands());
       for (unsigned i = 0, e = FI->getNumOperands(); i != e; ++i) {
         const Value *Op = FI->getOperand(i);
-        getValueUID(UID, BB->getParent(), Op);
+        BBOpNonGEPSection->putValue("Op", BB->getParent(), Op);
       }
 //      if (!isEquivalentOperation(FI, F2I))
 //        return false;
@@ -855,7 +964,8 @@ void UIDGenerator::getBBUID(UIDPartsType &UID, const BasicBlock *BB) {
   } while (FI != FE);
 }
 
-void UIDGenerator::getGEPUID(UIDPartsType &UID, const GEPOperator *GEP) {
+void UIDGenerator::Section::putGEP(StringRef Name, const GEPOperator *GEP) {
+  Section *GEPSection = subSection(Name, SubSectBBOpGEP);
   // When we have target data, we can reduce the GEP down to the value in bytes
   // added to the address.
   unsigned BitWidth = TD ? TD->getPointerSizeInBits() : 1;
@@ -870,27 +980,28 @@ void UIDGenerator::getGEPUID(UIDPartsType &UID, const GEPOperator *GEP) {
   if (TD)
     GEP->accumulateConstantOffset(*TD, Offset);
 
-  getAPIntUID(UID, Offset);
+  GEPSection->putAPInt("Offset", Offset);
 
 //  if (GEP1->getPointerOperand()->getType() !=
 //      GEP2->getPointerOperand()->getType())
 //    return false;
-  getTypeUID(UID, GEP->getPointerOperandType());
+  GEPSection->putType("PointerOperandType", GEP->getPointerOperandType());
 
 //  if (GEP1->getNumOperands() != GEP2->getNumOperands())
 //    return false;
-  UID.push_back(GEP->getNumOperands());
-
+  GEPSection->putPart("NumOperands", SemanticsNumber, GEP->getNumOperands());
 
 //  for (unsigned i = 0, e = GEP1->getNumOperands(); i != e; ++i) {
 //    if (!enumerate(GEP1->getOperand(i), GEP2->getOperand(i)))
 //      return false;
 //  }
   for (unsigned i = 0, e = GEP->getNumOperands(); i != e; ++i)
-    UID.push_back(getShortUID(GEP->getOperand(i)));
+    GEPSection->putPart("Op", SemanticsNumber,
+                        Generator->getShortUID(GEP->getOperand(i)));
 }
 
-void UIDGenerator::getOpCodeUID(UIDPartsType &UID, const Instruction *I) {
+void UIDGenerator::Section::putOpCode(StringRef Name, const Instruction *I) {
+  Section *OpCodeSection = subSection(Name, SubSectOpCode);
 //  // Differences from Instruction::isSameOperationAs:
 //  //  * replace type comparison with calls to isEquivalentType.
 //  //  * we test for I->hasSameSubclassOptionalData (nuw/nsw/tail) at the top
@@ -900,10 +1011,11 @@ void UIDGenerator::getOpCodeUID(UIDPartsType &UID, const Instruction *I) {
 //      !isEquivalentType(I1->getType(), I2->getType()) ||
 //      !I1->hasSameSubclassOptionalData(I2))
 //    return false;
-  UID.push_back(I->getOpcode());
-  UID.push_back(I->getNumOperands());
-  getTypeUID(UID, I->getType());
-  UID.push_back(I->getRawSubclassOptionalData());
+  OpCodeSection->putPart("OpCode", SemanticsEnum, I->getOpcode());
+  OpCodeSection->putPart("NumOperands", SemanticsNumber, I->getNumOperands());
+  OpCodeSection->putType("OpType", I->getType());
+  OpCodeSection->putPart("OptionalData",
+                         SemanticsNumber, I->getRawSubclassOptionalData());
 
 //  // We have two instructions of identical opcode and #operands.  Check to see
 //  // if all operands are the same type
@@ -912,7 +1024,7 @@ void UIDGenerator::getOpCodeUID(UIDPartsType &UID, const Instruction *I) {
 //                          I2->getOperand(i)->getType()))
 //      return false;
   for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i)
-    getTypeUID(UID, I->getOperand(i)->getType());
+    OpCodeSection->putType("OperandType", I->getOperand(i)->getType());
 
   // Check special state that is a part of some instructions.
 //  if (const LoadInst *LI = dyn_cast<LoadInst>(I1))
@@ -922,49 +1034,48 @@ void UIDGenerator::getOpCodeUID(UIDPartsType &UID, const Instruction *I) {
 //           LI->getSynchScope() == cast<LoadInst>(I2)->getSynchScope();
 
   if (const LoadInst *LI = dyn_cast<LoadInst>(I)) {
-    UID.push_back(LI->isVolatile());
-    UID.push_back(LI->getAlignment());
-    UID.push_back(LI->getOrdering());
-    UID.push_back(LI->getSynchScope());
+    OpCodeSection->putPart("IsVolatile", SemanticsFlag, LI->isVolatile());
+    OpCodeSection->putPart("Alignment", SemanticsNumber, LI->getAlignment());
+    OpCodeSection->putPart("Ordering", SemanticsNumber, LI->getOrdering());
+    OpCodeSection->putPart("SynchScope", SemanticsNumber, LI->getSynchScope());
   } else if (const StoreInst *SI = dyn_cast<StoreInst>(I)) {
-    UID.push_back(SI->isVolatile());
-    UID.push_back(SI->getAlignment());
-    UID.push_back(SI->getOrdering());
-    UID.push_back(SI->getSynchScope());
+    OpCodeSection->putPart("IsVolatile", SemanticsFlag, SI->isVolatile());
+    OpCodeSection->putPart("Alignment", SemanticsNumber, SI->getAlignment());
+    OpCodeSection->putPart("Ordering", SemanticsNumber, SI->getOrdering());
+    OpCodeSection->putPart("SynchScope", SemanticsNumber, SI->getSynchScope());
   } else if (const CmpInst *CI = dyn_cast<CmpInst>(I))
-    UID.push_back(CI->getPredicate());
+    OpCodeSection->putPart("Predicate", SemanticsNumber, CI->getPredicate());
   else if (const CallInst *CI = dyn_cast<CallInst>(I)) {
-    UID.push_back(CI->getCallingConv());
-    getAttributesUID(UID, CI->getAttributes());
+    OpCodeSection->putPart("CallingConv",
+                           SemanticsNumber, CI->getCallingConv());
+    OpCodeSection->putFunctionAttributes("CallAttrs", CI->getAttributes());
   } if (const InvokeInst *CI = dyn_cast<InvokeInst>(I)) {
-    UID.push_back(CI->getCallingConv());
-    getAttributesUID(UID, CI->getAttributes());
+    OpCodeSection->putPart("CallingConv",
+                           SemanticsNumber, CI->getCallingConv());
+    OpCodeSection->putFunctionAttributes("CallAttrs", CI->getAttributes());
   } else if (const InsertValueInst *IVI = dyn_cast<InsertValueInst>(I)) {
     ArrayRef<unsigned> Indices = IVI->getIndices();
-    UID.push_back(Indices.size());
+    OpCodeSection->putPart("Size", SemanticsNumber, Indices.size());
     for (unsigned i = 0, e = Indices.size(); i != e; ++i)
-      UID.push_back(Indices[i]);
+      OpCodeSection->putPart("IndicesItem", SemanticsNumber, Indices[i]);
   } else if (const ExtractValueInst *EVI = dyn_cast<ExtractValueInst>(I)) {
     ArrayRef<unsigned> Indices = EVI->getIndices();
-    UID.push_back(Indices.size());
+    OpCodeSection->putPart("Size", SemanticsNumber, Indices.size());
     for (unsigned i = 0, e = Indices.size(); i != e; ++i)
-      UID.push_back(Indices[i]);
+      OpCodeSection->putPart("IndicesItem", SemanticsNumber, Indices[i]);
   } else if (const FenceInst *FI = dyn_cast<FenceInst>(I)) {
-    UID.push_back(FI->getOrdering());
-    UID.push_back(FI->getSynchScope());
+    OpCodeSection->putPart("Ordering", SemanticsNumber, FI->getOrdering());
+    OpCodeSection->putPart("SynchScope", SemanticsNumber, FI->getSynchScope());
   } else if (const AtomicCmpXchgInst *CXI = dyn_cast<AtomicCmpXchgInst>(I)) {
-    UID.push_back(CXI->isVolatile());
-    UID.push_back(CXI->getOrdering());
-    UID.push_back(CXI->getSynchScope());
+    OpCodeSection->putPart("IsVolatile", SemanticsFlag, CXI->isVolatile());
+    OpCodeSection->putPart("Ordering", SemanticsNumber, CXI->getOrdering());
+    OpCodeSection->putPart("SynchScope", SemanticsNumber, CXI->getSynchScope());
   } else if (const AtomicRMWInst *RMWI = dyn_cast<AtomicRMWInst>(I)) {
-    UID.push_back(RMWI->isVolatile());
-    UID.push_back(RMWI->getOrdering());
-    UID.push_back(RMWI->getSynchScope());
+    OpCodeSection->putPart("IsVolatile", SemanticsFlag, RMWI->isVolatile());
+    OpCodeSection->putPart("Ordering", SemanticsNumber, RMWI->getOrdering());
+    OpCodeSection->putPart("SynchScope", SemanticsNumber,
+                           RMWI->getSynchScope());
   }
-}
-
-void UIDGenerator::getStringUID(UIDPartsType &UID, StringRef V) {
-  UID.insert(UID.end(), V.begin(), V.end());
 }
 
 // Compare two values used by the two functions under pair-wise comparison. If
