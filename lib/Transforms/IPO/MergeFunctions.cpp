@@ -233,10 +233,14 @@ namespace llvm {
 namespace {
 
 class UIDGenerator {
+public:
+
   typedef uint64_t UIDPartType;
   typedef std::vector<UIDPartType> UIDPartsType;
 
-public:
+  const UIDPartsType& getFuncUID();
+
+private:
 
   enum PartSemantics {
     SemanticsComplexSectionTag,
@@ -282,7 +286,50 @@ public:
     case SemanticsCharacters:
       return "Characters";
     }
+    llvm_unreachable("Unknown section semantics");
     return "Unknown";
+  }
+
+  static StringRef getSubSectionTypeName(SubsectionType SSTy) {
+    switch (SSTy) {
+    case SubSectRoot:
+      return "SubSectRoot";
+    case SubSectAttributes:
+      return "SubSectAttributes";
+    case SubSectAttrSlot:
+      return "SubSectAttrSlot";
+    case SubSectType:
+      return "SubSectType";
+    case SubSectValue:
+      return "SubSectValue";
+    case SubSectConstant:
+      return "SubSectConstant";
+    case SubSectConstantArray:
+      return "SubSectConstantArray";
+    case SubSectConstantStruct:
+      return "SubSectConstantStruct";
+    case SubSectConstantVector:
+      return "SubSectConstantVector";
+    case SubSectAPInt:
+      return "SubSectAPInt";
+    case SubSectAPFloat:
+      return "SubSectAPFloat";
+    case SubSectBB:
+      return "SubSectBB";
+    case SubSectBBOp:
+      return "SubSectBBOp";
+    case SubSectBBOpGEP:
+      return "SubSectBBOpGEP";
+    case SubSectBBOpNonGEP:
+      return "SubSectBBOpNonGEP";
+    case SubSectOpCode:
+      return "SubSectOpCode";
+    case SubSectString:
+      return "SubSectString";
+    default:
+      llvm_unreachable("Unknown complex section type");
+      return "Unknown";
+    }
   }
 
   class Section {
@@ -331,6 +378,8 @@ public:
         for (size_t i = SectionStart; i != SectionEnd; ++i)
           dbgs().indent(indent + 2).write_hex((*UID)[i]) << "\n";
       } else {
+        dbgs() << "Type: " <<
+            UIDGenerator::getSubSectionTypeName((*UID)[1]) << "\n"
         dbgs() << "{\n";
         for (SubSectionsType::const_iterator
              i = Subsections.begin(), e = Subsections.end(); i != e; ++i) {
@@ -387,25 +436,11 @@ public:
     F(_F)
   {}
 
-  void getFuncUID();
-
 private:
 
   UIDPartsType *getUID();
   DataLayout *getTD();
   friend class Section;
-
-  void getAttributesUID(Section *UID, const AttributeSet AS);
-  void getTypeUID(UIDPartsType &UID, const Type *Ty);
-  void getValueUID(UIDPartsType &UID, const Function *F, const Value *V);
-  void getConstantUID(UIDPartsType &UID, const Constant *C,
-                      bool WithType = true);
-  void getAPIntUID(UIDPartsType &UID, const APInt &V);
-  void getAPFloatUID(UIDPartsType &UID, const APFloat &V);
-  void getBBUID(UIDPartsType &UID, const BasicBlock *BB);
-  void getGEPUID(UIDPartsType &UID, const GEPOperator *GEP);
-  void getOpCodeUID(UIDPartsType &UID, const Instruction* I);
-  void getStringUID(UIDPartsType &UID, const StringRef V);
 
   UIDPartType getShortUID(const Value *V) {
     std::pair<DenseMap<const Value*, UIDPartType>::iterator, bool> res =
@@ -651,7 +686,9 @@ bool FunctionComparator::isEquivalentGEP(const GEPOperator *GEP1,
 /// method.
 /// This method encodes function into set of unsigned numbers,
 /// similar to bitcode writer, but simplier.
-void UIDGenerator::getFuncUID() {
+const UIDGenerator::UIDPartsType& UIDGenerator::getFuncUID() {
+  UID.clear();
+
   RootSection.putFunctionAttributes("FunctionAttributes", F->getAttributes());
   RootSection.putPart("GC", SemanticsPointer,
                       F->hasGC() ? (UIDPartType)F->getGC() : 0);
@@ -694,6 +731,8 @@ void UIDGenerator::getFuncUID() {
       BBs.push_back(TI->getSuccessor(i));
     }
   }
+
+  return UID;
 }
 
 void UIDGenerator::Section::putFunctionAttributes(StringRef Name,
