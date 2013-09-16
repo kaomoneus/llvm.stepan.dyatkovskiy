@@ -238,7 +238,17 @@ public:
   typedef uint64_t UIDPartType;
   typedef std::vector<UIDPartType> UIDPartsType;
 
+  UIDGenerator(const Function *_F, const DataLayout* _TD) :
+    NextShortUID(0),
+    RootSection(this, "Root", SubSectRoot),
+    F(_F), TD(_TD) {}
+
   const UIDPartsType& getFuncUID();
+
+  void dump() {
+    getFuncUID();
+    RootSection.dump(0);
+  }
 
 private:
 
@@ -335,7 +345,7 @@ private:
   class Section {
     typedef std::list<Section> SubSectionsType;
   public:
-    Section* subSection(StringRef Name, SubsectionType SSType) {
+    Section *subSection(StringRef Name, SubsectionType SSType) {
       Subsections.push_back(Section(Generator, Name, SSType));
       return &Subsections.back();
     }
@@ -352,7 +362,7 @@ private:
     void putOpCode(StringRef Name, const Instruction* I);
 
     void putString(StringRef Name, StringRef V) {
-      Section *StringSection = subSection(Name, SubSectString);
+      SectionWrapper StringSection = subSection(Name, SubSectString);
         StringSection->putPart("Length", SemanticsNumber, V.size());
         UID->insert(UID->end(), V.begin(), V.end());
       StringSection->close();
@@ -372,15 +382,18 @@ private:
       dbgs().indent(indent);
       if (!Name.empty())
         dbgs() << Name << " ";
-      dbgs() << UIDGenerator::getSemanticsName(SectionSemantics) << " ";
-      if (Subsections.empty()) {
+      dbgs() << UIDGenerator::getSemanticsName(SectionSemantics)
+             << " (SemanticsID=" << (*UID)[SectionStart] << ")";
+      if (SectionSemantics != SemanticsComplexSectionTag) {
         dbgs() << ":\n";
-        for (size_t i = SectionStart; i != SectionEnd; ++i)
+        for (size_t i = SectionStart + 1; i != SectionEnd; ++i)
           dbgs().indent(indent + 2).write_hex((*UID)[i]) << "\n";
       } else {
-        dbgs() << "Type: " <<
-            UIDGenerator::getSubSectionTypeName((*UID)[1]) << "\n"
-        dbgs() << "{\n";
+        dbgs() << "Type: "
+            << UIDGenerator::getSubSectionTypeName(
+                (SubsectionType)(*UID)[SectionStart + 1])
+            << "\n";
+        dbgs().indent(indent) << "{\n";
         for (SubSectionsType::const_iterator
              i = Subsections.begin(), e = Subsections.end(); i != e; ++i) {
           i->dump(indent + 2);
@@ -431,15 +444,23 @@ private:
     friend class UIDGenerator;
   };
 
-  UIDGenerator(const Function *_F) :
-    RootSection(this, "Root", SubSectRoot),
-    F(_F)
-  {}
+  class SectionWrapper {
+    Section *Sect;
+  public:
+    SectionWrapper(Section *S) : Sect(S) {};
+    ~SectionWrapper() { Sect->close(); }
+    Section *operator->() { return Sect; }
+  };
 
 private:
 
-  UIDPartsType *getUID();
-  DataLayout *getTD();
+  UIDPartsType *getUID() {
+    return &UID;
+  }
+
+  const DataLayout *getTD() {
+    return TD;
+  }
   friend class Section;
 
   UIDPartType getShortUID(const Value *V) {
@@ -454,11 +475,11 @@ private:
   UIDPartType NextShortUID;
   DenseMap<const Value*, UIDPartType> ValueToShortUID;
 
-  const DataLayout *TD;
-
   UIDPartsType UID;
   Section RootSection;
+
   const Function *F;
+  const DataLayout *TD;
 };
 
 /// FunctionComparator - Compares two functions to determine whether or not
@@ -687,6 +708,7 @@ bool FunctionComparator::isEquivalentGEP(const GEPOperator *GEP1,
 /// This method encodes function into set of unsigned numbers,
 /// similar to bitcode writer, but simplier.
 const UIDGenerator::UIDPartsType& UIDGenerator::getFuncUID() {
+  NextShortUID = 0;
   UID.clear();
 
   RootSection.putFunctionAttributes("FunctionAttributes", F->getAttributes());
@@ -737,10 +759,10 @@ const UIDGenerator::UIDPartsType& UIDGenerator::getFuncUID() {
 
 void UIDGenerator::Section::putFunctionAttributes(StringRef Name,
                                                   const AttributeSet AS) {
-  Section *AttrsSection = subSection(Name, SubSectAttributes);
+  SectionWrapper AttrsSection = subSection(Name, SubSectAttributes);
   // Mostly cloned from BitcodeWriter, but simplified a bit.
   for (unsigned i = 0, e = AS.getNumSlots(); i != e; ++i) {
-    Section *AttrSlot = AttrsSection->subSection("Slot", SubSectAttrSlot);
+    SectionWrapper AttrSlot = AttrsSection->subSection("Slot", SubSectAttrSlot);
     AttrSlot->putPart("Index", SemanticsNumber, AS.getSlotIndex(i));
     for (AttributeSet::iterator I = AS.begin(i), E = AS.end(i);
      I != E; ++I) {
@@ -767,7 +789,7 @@ void UIDGenerator::Section::putFunctionAttributes(StringRef Name,
 
 void UIDGenerator::Section::putType(StringRef Name, const Type *Ty) {
 
-  Section *SectionType = subSection(Name, SubSectType);
+  SectionWrapper SectionType = subSection(Name, SubSectType);
 
   // TODO: Lossless bitcasts
   enum UIDTypeID {
@@ -789,8 +811,18 @@ void UIDGenerator::Section::putType(StringRef Name, const Type *Ty) {
     // Fall through in Release mode.
   case Type::IntegerTyID:
   case Type::VectorTyID:
+  case Type::PointerTyID:
     // Ty1 == Ty2 would have returned true earlier.
+    UIDPartType IntID;
+    if (Ty->getTypeID() != Type::PointerTyID)
+      IntID = (UIDPartType)(Ty);
+    else {
+      const Type* Ty2 = TD->getIntPtrType(Ty->getContext());
+      IntID = (UIDPartType)(Ty2);
+    }
+
     SectionType->putPart("TypeID", SemanticsEnum, IntegerUID);
+    SectionType->putPart("IntID", SemanticsEnum, IntID);
     break;
 
   case Type::FloatTyID:
@@ -800,18 +832,9 @@ void UIDGenerator::Section::putType(StringRef Name, const Type *Ty) {
   case Type::PPC_FP128TyID:
   case Type::LabelTyID:
   case Type::MetadataTyID:
+  case Type::VoidTyID:
     SectionType->putPart("TypeID", SemanticsEnum, VoidUID);
     break;
-
-  case Type::PointerTyID: {
-    SectionType->putPart("TypeID", SemanticsEnum, PointerUID);
-    SectionType->putPart("AddressSpace", SemanticsEnum,
-                         Ty->getPointerAddressSpace());
-    LLVMContext &Ctx = Ty->getContext();
-    SectionType->putPart("IntID", SemanticsEnum,
-                         (UIDPartType)(TD->getIntPtrType(Ctx)));
-    break;
-  }
 
   case Type::StructTyID: {
     SectionType->putPart("TypeID", SemanticsEnum, StructUID);
@@ -848,7 +871,7 @@ void UIDGenerator::Section::putType(StringRef Name, const Type *Ty) {
 
 void UIDGenerator::Section::putValue(StringRef Name,
                                      const Function *F, const Value *V) {
-  Section *ValueSection = subSection(Name, SubSectValue);
+  SectionWrapper ValueSection = subSection(Name, SubSectValue);
   // Check for function @f referring to itself, put ZERO in this case.
   if (F == V) {
     ValueSection->putPart("ValueContents", SemanticsPointer, 0);
@@ -871,7 +894,7 @@ void UIDGenerator::Section::putValue(StringRef Name,
 
 void UIDGenerator::Section::putConstant(StringRef Name,
                                         const Constant *C, bool WithType) {
-  Section *ConstantSection = subSection(Name, SubSectConstant);
+  SectionWrapper ConstantSection = subSection(Name, SubSectConstant);
 
   Type::TypeID TyID = C->getType()->getTypeID();
   assert(TyID == Type::IntegerTyID ||
@@ -894,7 +917,7 @@ void UIDGenerator::Section::putConstant(StringRef Name,
   }
 
   if (const ConstantArray *CA = dyn_cast<ConstantArray>(C)) {
-    Section *ArraySection =
+    SectionWrapper ArraySection =
         ConstantSection->subSection("ConstantValue", SubSectConstantArray);
     const ArrayType *AT = CA->getType();
     uint64_t NumElements = AT->getNumElements();
@@ -904,7 +927,7 @@ void UIDGenerator::Section::putConstant(StringRef Name,
   }
 
   if (const ConstantStruct *CS = dyn_cast<ConstantStruct>(C)) {
-    Section *StructSection =
+    SectionWrapper StructSection =
         ConstantSection->subSection("ConstantValue", SubSectConstantStruct);
     const StructType *ST = cast<StructType>(CS->getType());
     for (unsigned i = 0, e = ST->getNumElements(); i != e; ++i)
@@ -913,7 +936,7 @@ void UIDGenerator::Section::putConstant(StringRef Name,
   }
 
   if (const ConstantVector *CV = dyn_cast<ConstantVector>(C)) {
-    Section *VectorSection =
+    SectionWrapper VectorSection =
         ConstantSection->subSection("ConstantValue", SubSectConstantVector);
     const VectorType *VT = CV->getType();
     uint64_t NumElements = VT->getNumElements();
@@ -928,7 +951,7 @@ void UIDGenerator::Section::putConstant(StringRef Name,
 }
 
 void UIDGenerator::Section::putAPInt(StringRef Name, const APInt &V) {
-  Section *APIntSection = subSection(Name, SubSectAPInt);
+  SectionWrapper APIntSection = subSection(Name, SubSectAPInt);
   APIntSection->putPart("ActiveBits", SemanticsNumber, V.getActiveBits());
   const uint64_t *raw = V.getRawData();
   for (unsigned w = 0, e = V.getActiveWords(); w != e; ++w)
@@ -940,7 +963,7 @@ void UIDGenerator::Section::putAPFloat(StringRef Name, const APFloat &V) {
   // with different internal semantics.
   // Also even for same floats different semantics always assume very
   // small, but error. And this error could do bad things sometimes.
-  Section *APFloatSection = subSection(Name, SubSectAPFloat);
+  SectionWrapper APFloatSection = subSection(Name, SubSectAPFloat);
   APFloatSection->putPart("FloatSemantics", SemanticsPointer,
                           (UIDPartType)&V.getSemantics());
   APFloatSection->putAPInt("FloatContents", V.bitcastToAPInt());
@@ -948,14 +971,14 @@ void UIDGenerator::Section::putAPFloat(StringRef Name, const APFloat &V) {
 
 void UIDGenerator::Section::putBB(StringRef Name, const BasicBlock *BB) {
 
-  Section *BBSection = subSection(Name, SubSectBB);
+  SectionWrapper BBSection = subSection(Name, SubSectBB);
 
   BasicBlock::const_iterator FI = BB->begin(), FE = BB->end();
 
   BBSection->putPart("Size", SemanticsNumber, BB->size());
 
   do {
-    Section *BBOpSection = BBSection->subSection("BBOp", SubSectBBOp);
+    SectionWrapper BBOpSection = BBSection->subSection("BBOp", SubSectBBOp);
 //    if (!enumerate(FI, F2I))
 //      return false;
     BBOpSection->putPart("ShortUID", SemanticsNumber,
@@ -973,7 +996,7 @@ void UIDGenerator::Section::putBB(StringRef Name, const BasicBlock *BB) {
       //        return false;
       BBOpSection->putGEP("OperationContents", cast<GEPOperator>(GEP));
     } else {
-      Section *BBOpNonGEPSection =
+      SectionWrapper BBOpNonGEPSection =
           BBOpSection->subSection("NonGEP", SubSectBBOpNonGEP);
       BBOpNonGEPSection->putOpCode("NonGEPOpcode", (const Instruction*)FI);
       BBOpNonGEPSection->putPart("NumOperands",
@@ -1004,7 +1027,7 @@ void UIDGenerator::Section::putBB(StringRef Name, const BasicBlock *BB) {
 }
 
 void UIDGenerator::Section::putGEP(StringRef Name, const GEPOperator *GEP) {
-  Section *GEPSection = subSection(Name, SubSectBBOpGEP);
+  SectionWrapper GEPSection = subSection(Name, SubSectBBOpGEP);
   // When we have target data, we can reduce the GEP down to the value in bytes
   // added to the address.
   unsigned BitWidth = TD ? TD->getPointerSizeInBits() : 1;
@@ -1040,7 +1063,7 @@ void UIDGenerator::Section::putGEP(StringRef Name, const GEPOperator *GEP) {
 }
 
 void UIDGenerator::Section::putOpCode(StringRef Name, const Instruction *I) {
-  Section *OpCodeSection = subSection(Name, SubSectOpCode);
+  SectionWrapper OpCodeSection = subSection(Name, SubSectOpCode);
 //  // Differences from Instruction::isSameOperationAs:
 //  //  * replace type comparison with calls to isEquivalentType.
 //  //  * we test for I->hasSameSubclassOptionalData (nuw/nsw/tail) at the top
@@ -1577,6 +1600,12 @@ bool MergeFunctions::insert(ComparableFunction &NewF) {
 
   DEBUG(dbgs() << "  " << OldF.getFunc()->getName() << " == "
                << NewF.getFunc()->getName() << '\n');
+
+  DEBUG(dbgs() << "OldFunc:\n");
+  DEBUG(UIDGenerator(OldF.getFunc(), TD).dump());
+
+  DEBUG(dbgs() << "\n\nNewFunc:\n");
+  DEBUG(UIDGenerator(NewF.getFunc(), TD).dump());
 
   Function *DeleteF = NewF.getFunc();
   NewF.release();
