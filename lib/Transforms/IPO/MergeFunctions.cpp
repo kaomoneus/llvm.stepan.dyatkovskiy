@@ -178,8 +178,8 @@ public:
   void onFunctionUniqueButSameUID(Function *F, const UIDPartsType& UID) {
     ++getRecordData(F->getParent()).UniqueSameUID;
     DumpOS << "BEGIN\n"
-           << "onFunctionUniqueButSameUID"
-           << "Function:\n" << F;
+           << "onFunctionUniqueButSameUID\n"
+           << "Function:\n" << *F;
     DumpOS << "UID:\n";
     dumpUID(DumpOS, UID);
     DumpOS << "END\n";
@@ -188,11 +188,15 @@ public:
   void onFunctionNonUniqueButWithNewUID(Function *NewF, Function *OldF) {
     ++getRecordData(NewF->getParent()).NonUniqueNewUID;
     DumpOS << "BEGIN\n"
-           << "onFunctionNonUniqueButWithNewUID"
-           << "New Function:\n" << NewF
+           << "onFunctionNonUniqueButWithNewUID\n"
+           << "New Function:\n" << *NewF
            << "\n"
-           << "Old Function:\n" << OldF
-           << "\n";
+           << "Old Function:\n" << *OldF
+           << "END\n";
+  }
+
+  raw_ostream& onDumpCustom() {
+    return DumpOS;
   }
 };
 
@@ -954,24 +958,17 @@ void UIDGenerator::Section::putConstant(StringRef Name,
                                         const Constant *C, bool WithType) {
   SectionWrapper ConstantSection = subSection(Name, SubSectConstant);
 
-  Type::TypeID TyID = C->getType()->getTypeID();
-  assert(TyID == Type::IntegerTyID ||
-         TyID == Type::FloatTyID ||
-         TyID == Type::ArrayTyID ||
-         TyID == Type::StructTyID ||
-         TyID == Type::VectorTyID ||
-         isa<UndefValue>(C)
-        );
-
   if (WithType)
     ConstantSection->putType("ConstantType", C->getType());
 
   if (const ConstantInt *CI = dyn_cast<ConstantInt>(C)) {
     ConstantSection->putAPInt("ConstantValue", CI->getValue());
+    return;
   }
 
   if (const ConstantFP *CF = dyn_cast<ConstantFP>(C)) {
     ConstantSection->putAPFloat("ConstantValue", CF->getValueAPF());
+    return;
   }
 
   if (const ConstantArray *CA = dyn_cast<ConstantArray>(C)) {
@@ -982,6 +979,7 @@ void UIDGenerator::Section::putConstant(StringRef Name,
     for (uint64_t i = 0; i < NumElements; ++i)
       ArraySection->putConstant("Item",
                                 cast<Constant>(CA->getOperand(i)), false);
+    return;
   }
 
   if (const ConstantStruct *CS = dyn_cast<ConstantStruct>(C)) {
@@ -991,6 +989,7 @@ void UIDGenerator::Section::putConstant(StringRef Name,
     for (unsigned i = 0, e = ST->getNumElements(); i != e; ++i)
       StructSection->putConstant("Item",
                                  cast<Constant>(CS->getOperand(i)), false);
+    return;
   }
 
   if (const ConstantVector *CV = dyn_cast<ConstantVector>(C)) {
@@ -1001,11 +1000,27 @@ void UIDGenerator::Section::putConstant(StringRef Name,
     for (uint64_t i = 0; i < NumElements; ++i)
       VectorSection->putConstant("Item",
                                  cast<Constant>(CV->getOperand(i)), false);
+    return;
   }
 
   if (isa<UndefValue>(C)) {
     ConstantSection->putPart("ConstantValue", SemanticsEnum, ~0);
+    return;
   }
+
+  // else, we don't know  the constant we have, just put it as value.
+
+  getOverallStats().onDumpCustom()
+      << "BEGIN\n"
+      << "Unknown constant: ";
+  C->print(getOverallStats().onDumpCustom());
+  getOverallStats().onDumpCustom()
+      << "END\n";
+
+  ConstantSection->putPart("ConstantValue", SemanticsPointer,
+                           (UIDPartType)C);
+
+
 }
 
 void UIDGenerator::Section::putAPInt(StringRef Name, const APInt &V) {
