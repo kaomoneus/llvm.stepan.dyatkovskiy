@@ -68,6 +68,7 @@
 #include "llvm/Support/ValueHandle.h"
 #include "llvm/Support/raw_ostream.h"
 #include <ctime>
+#include <map>
 #include <string>
 #include <vector>
 #include <list>
@@ -78,23 +79,49 @@ STATISTIC(NumThunksWritten, "Number of thunks generated");
 STATISTIC(NumAliasesWritten, "Number of aliases generated");
 STATISTIC(NumDoubleWeak, "Number of new functions created");
 
+typedef uint64_t UIDPartType;
+typedef std::vector<UIDPartType> UIDPartsType;
+
 static const char *OverallStatisticsFileName =
     "/home/stepan/projects/llvm.project/5-tests/db-ops.csv";
+static const char *OverallDumpFileName =
+    "/home/stepan/projects/llvm.project/5-tests/mergefunc-dump.txt";
+
+static void dumpUID(raw_ostream &O, const UIDPartsType& UID) {
+  O << "UID {\n";
+  unsigned NumInRow = 0;
+  for (UIDPartsType::const_iterator
+       i = UID.begin(), e = UID.end(); i != e; ++i) {
+    O.write_hex(*i);
+    if (NumInRow++ > 10) {
+      NumInRow = 0;
+      O << "\n";
+    }
+    else
+      O << " ";
+  }
+  O << "\n}\n";
+}
+
 class OverallStats {
 
   struct RecordData {
     std::string ModuleName;
     unsigned Unique;
     unsigned Merged;
+    unsigned UniqueSameUID;
+    unsigned NonUniqueNewUID;
   };
 
   bool AppendMode;
   std::string StatisticsOSErrInfo;
+  std::string DumpOSErrInfo;
   llvm::raw_fd_ostream StatisticsOS;
+  llvm::raw_fd_ostream DumpOS;
   DenseMap<Module*, RecordData > Records;
 
   void writeHeader() {
-    StatisticsOS << "Module; Unique; Merged\n";
+    StatisticsOS << "Module; Unique; Merged; UniSameUID; NonUniNewUID\n";
   }
 
   RecordData &getRecordData(Module *M) {
@@ -105,6 +132,8 @@ class OverallStats {
         rd.ModuleName = M->getModuleIdentifier();
       rd.Unique = 0;
       rd.Merged = 0;
+      rd.UniqueSameUID = 0;
+      rd.NonUniqueNewUID = 0;
       return rd;
     }
 
@@ -116,7 +145,10 @@ public:
     AppendMode(llvm::sys::fs::exists(OverallStatisticsFileName)),
     StatisticsOS(OverallStatisticsFileName,
                  StatisticsOSErrInfo,
-                 sys::fs::F_Append) {
+                 sys::fs::F_Append),
+    DumpOS(OverallDumpFileName,
+           DumpOSErrInfo,
+           sys::fs::F_Append) {
     if (!AppendMode)
       writeHeader();
   }
@@ -127,9 +159,13 @@ public:
          i = Records.begin(), e = Records.end(); i != e; ++i) {
       StatisticsOS << i->second.ModuleName << "-" << t << ";"
                    << i->second.Unique << ";"
-                   << i->second.Merged << "\n";
+                   << i->second.Merged << ";"
+                   << i->second.UniqueSameUID << ";"
+                   << i->second.NonUniqueNewUID << "\n";
+
     }
     StatisticsOS.close();
+    DumpOS.close();
   }
 
   void onFunctionMerged(Function *F) {
@@ -137,6 +173,26 @@ public:
   }
   void onFunctionUnique(Function *F) {
     ++getRecordData(F->getParent()).Unique;
+  }
+
+  void onFunctionUniqueButSameUID(Function *F, const UIDPartsType& UID) {
+    ++getRecordData(F->getParent()).UniqueSameUID;
+    DumpOS << "BEGIN\n"
+           << "onFunctionUniqueButSameUID"
+           << "Function:\n" << F;
+    DumpOS << "UID:\n";
+    dumpUID(DumpOS, UID);
+    DumpOS << "END\n";
+  }
+
+  void onFunctionNonUniqueButWithNewUID(Function *NewF, Function *OldF) {
+    ++getRecordData(NewF->getParent()).NonUniqueNewUID;
+    DumpOS << "BEGIN\n"
+           << "onFunctionNonUniqueButWithNewUID"
+           << "New Function:\n" << NewF
+           << "\n"
+           << "Old Function:\n" << OldF
+           << "\n";
   }
 };
 
@@ -247,17 +303,7 @@ public:
 
   void dump(bool Verbose = true) {
     getFuncUID();
-    dbgs() << "UID {\n";
-    unsigned NumInRow = 0;
-    for (UIDPartsType::iterator i = UID.begin(), e = UID.end(); i != e; ++i) {
-      dbgs().write_hex(*i);
-      if (NumInRow++ > 10) {
-        NumInRow = 0;
-        dbgs() << "\n";
-      } else
-        dbgs() << " ";
-    }
-    dbgs() << "\n}\n";
+    dumpUID(dbgs(), UID);
     if (Verbose)
       RootSection.dump(0);
   }
@@ -719,7 +765,7 @@ bool FunctionComparator::isEquivalentGEP(const GEPOperator *GEP1,
 /// method.
 /// This method encodes function into set of unsigned numbers,
 /// similar to bitcode writer, but simplier.
-const UIDGenerator::UIDPartsType& UIDGenerator::getFuncUID() {
+const UIDPartsType& UIDGenerator::getFuncUID() {
   NextShortUID = 0;
   UID.clear();
 
@@ -1332,6 +1378,7 @@ public:
 
 private:
   typedef DenseSet<ComparableFunction> FnSetType;
+  typedef std::map<UIDPartsType, Function*> UIDSMap;
 
   /// A work queue of functions that may have been modified and should be
   /// analyzed again.
@@ -1371,6 +1418,8 @@ private:
   /// The set of all distinct functions. Use the insert() and remove() methods
   /// to modify it.
   FnSetType FnSet;
+
+  UIDSMap FnMap;
 
   /// DataLayout for more accurate GEP comparisons. May be NULL.
   DataLayout *TD;
@@ -1597,10 +1646,19 @@ void MergeFunctions::mergeTwoFunctions(Function *F, Function *G) {
 // Insert a ComparableFunction into the FnSet, or merge it away if equal to one
 // that was already inserted.
 bool MergeFunctions::insert(ComparableFunction &NewF) {
+  UIDPartsType NewFuncUID = UIDGenerator(NewF.getFunc(), TD).getFuncUID();
+  std::pair<UIDSMap::iterator, bool> UIDLookupRes =
+    FnMap.insert(std::make_pair(NewFuncUID, NewF.getFunc()));
+
   std::pair<FnSetType::iterator, bool> Result = FnSet.insert(NewF);
   if (Result.second) {
     DEBUG(dbgs() << "Inserting as unique: " << NewF.getFunc()->getName() << '\n');
     getOverallStats().onFunctionUnique(NewF.getFunc());
+
+    if (!UIDLookupRes.second)
+      getOverallStats().onFunctionUniqueButSameUID(
+          NewF.getFunc(), UIDLookupRes.first->first);
+
     return false;
   }
 
@@ -1613,11 +1671,10 @@ bool MergeFunctions::insert(ComparableFunction &NewF) {
   DEBUG(dbgs() << "  " << OldF.getFunc()->getName() << " == "
                << NewF.getFunc()->getName() << '\n');
 
-  DEBUG(dbgs() << "OldFunc:\n");
-  DEBUG(UIDGenerator(OldF.getFunc(), TD).dump());
-
-  DEBUG(dbgs() << "\n\nNewFunc:\n");
-  DEBUG(UIDGenerator(NewF.getFunc(), TD).dump());
+  if (UIDLookupRes.second) {
+    getOverallStats().onFunctionNonUniqueButWithNewUID(
+        NewF.getFunc(), OldF.getFunc());
+  }
 
   Function *DeleteF = NewF.getFunc();
   NewF.release();
