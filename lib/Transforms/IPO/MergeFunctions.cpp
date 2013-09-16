@@ -245,9 +245,21 @@ public:
 
   const UIDPartsType& getFuncUID();
 
-  void dump() {
+  void dump(bool Verbose = true) {
     getFuncUID();
-    RootSection.dump(0);
+    dbgs() << "UID {\n";
+    unsigned NumInRow = 0;
+    for (UIDPartsType::iterator i = UID.begin(), e = UID.end(); i != e; ++i) {
+      dbgs().write_hex(*i);
+      if (NumInRow++ > 10) {
+        NumInRow = 0;
+        dbgs() << "\n";
+      } else
+        dbgs() << " ";
+    }
+    dbgs() << "\n}\n";
+    if (Verbose)
+      RootSection.dump(0);
   }
 
 private:
